@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+@theme {
+  --color-canvas: #090b0c;
+  --color-surface: #111416;
+  --color-surface-raised: #171b1d;
+  --color-line: #2a3033;
+  --color-signal: #a8d94f;
+  --color-signal-dim: #7da835;
+  --color-ink: #f2f4ef;
+  --color-muted: #9aa3a0;
+  --radius-panel: 1rem;
+  --radius-control: 0.625rem;
+}
+
+:root {
+  --canvas-bg: #090b0c;
+  --surface-bg: #111416;
+  --surface-raised: #171b1d;
+  --line-color: #2a3033;
+  --signal-accent: #a8d94f;
+  --text-main: #f2f4ef;
+  --text-muted: #9aa3a0;
+}
+
+body {
+  background-color: var(--canvas-bg);
+  color: var(--text-main);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  overflow-x: hidden;
+  margin: 0;
+  padding: 0;
+}
+
+/* Custom scrollbars for instrument panels */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #090b0c;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a3033;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3f474b;
+}
+
+/* Tabular nums for measurement displays */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Radar Sweep Animation */
+@keyframes radar-sweep {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-radar-sweep {
+  animation: radar-sweep 4s linear infinite;
+  transform-origin: center center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-radar-sweep {
+    animation: none !important;
+  }
+}
