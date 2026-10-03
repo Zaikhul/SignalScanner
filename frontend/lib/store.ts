@@ -66,6 +66,9 @@ interface ScannerStore {
   setConnectionState: (state: "connected" | "reconnecting" | "disconnected" | "idle") => void;
   lastSequence: number;
   setLastSequence: (seq: number) => void;
+  snapshotWatermark: number;
+  setSnapshotWatermark: (seq: number) => void;
+  processedMeasurementKeys: Set<string>;
   droppedFrames: number;
   incrementDroppedFrames: () => void;
 
@@ -137,6 +140,8 @@ export const useScannerStore = create<ScannerStore>((set, get) => ({
           latestFftBins: [],
           selectedTargetId: null,
           lastSequence: 0,
+          snapshotWatermark: 0,
+          processedMeasurementKeys: new Set(),
           droppedFrames: 0,
           latestQuality: null,
           latestTraceId: null,
@@ -208,8 +213,19 @@ export const useScannerStore = create<ScannerStore>((set, get) => ({
       let newCenterFreq = state.latestFftCenterFreq;
       let latestQ = state.latestQuality;
       const targetMap = new Map(state.targets.map((t) => [t.target_id, { ...t }]));
+      const seenKeys = new Set(state.processedMeasurementKeys || []);
 
       for (const ev of events) {
+        const key = `${ev.sequence}:${ev.target_id}`;
+        if (seenKeys.has(key)) {
+          continue; // Already processed this measurement in this session
+        }
+        seenKeys.add(key);
+        if (seenKeys.size > 5000) {
+          const firstKey = seenKeys.values().next().value;
+          if (firstKey) seenKeys.delete(firstKey);
+        }
+
         if (ev.quality) {
           latestQ = ev.quality;
         }
@@ -233,6 +249,9 @@ export const useScannerStore = create<ScannerStore>((set, get) => ({
         const observedAt = ev.quality?.observed_at || ev.captured_at;
         const outOfScale = signalVal < -100 ? "low" : signalVal > -30 ? "high" : null;
 
+        // Is this event already accounted for in the snapshot watermark?
+        const isHistoricalToSnapshot = state.snapshotWatermark > 0 && ev.sequence <= state.snapshotWatermark;
+
         if (existing) {
           const prevSig = existing.latest_signal;
           if (prevSig !== undefined && prevSig !== null && Number.isFinite(prevSig)) {
@@ -243,9 +262,11 @@ export const useScannerStore = create<ScannerStore>((set, get) => ({
           existing.observed_at = observedAt;
           existing.latest_signal = signalVal;
           existing.out_of_scale = outOfScale;
-          existing.sample_count += 1;
-          existing.min_signal = Math.min(existing.min_signal, signalVal);
-          existing.max_signal = Math.max(existing.max_signal, signalVal);
+          if (!isHistoricalToSnapshot) {
+            existing.sample_count += 1;
+            existing.min_signal = Math.min(existing.min_signal, signalVal);
+            existing.max_signal = Math.max(existing.max_signal, signalVal);
+          }
           if (ev.signal.snr !== undefined) existing.avg_snr = ev.signal.snr;
           if (ev.display_name) existing.display_name = ev.display_name;
           if (ev.radio?.channel) existing.channel = ev.radio.channel;
@@ -290,6 +311,7 @@ export const useScannerStore = create<ScannerStore>((set, get) => ({
         targets: Array.from(targetMap.values()).sort(
           (a, b) => b.latest_signal - a.latest_signal
         ),
+        processedMeasurementKeys: seenKeys,
       };
     }),
 
@@ -297,6 +319,9 @@ export const useScannerStore = create<ScannerStore>((set, get) => ({
   setConnectionState: (connectionState) => set({ connectionState }),
   lastSequence: 0,
   setLastSequence: (lastSequence) => set({ lastSequence }),
+  snapshotWatermark: 0,
+  setSnapshotWatermark: (snapshotWatermark) => set({ snapshotWatermark }),
+  processedMeasurementKeys: new Set<string>(),
   droppedFrames: 0,
   incrementDroppedFrames: () =>
     set((state) => ({ droppedFrames: state.droppedFrames + 1 })),

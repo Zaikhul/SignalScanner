@@ -23,6 +23,7 @@ export function useSessionStream(sessionId?: string | null) {
     upsertLanHost,
     setAdapterConflictNotice,
     recordScanActivity,
+    setSnapshotWatermark,
   } = useScannerStore();
 
   useEffect(() => {
@@ -39,11 +40,29 @@ export function useSessionStream(sessionId?: string | null) {
     const connectWebSocket = () => {
       if (!isMounted || isClosingIntentionallyRef.current) return;
 
-      const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const host = window.location.hostname || "127.0.0.1";
-      const port = "8000";
+      let wsBase = "";
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      if (apiUrl) {
+        try {
+          const parsed = new URL(apiUrl, window.location.href);
+          const proto = parsed.protocol === "https:" ? "wss:" : "ws:";
+          wsBase = `${proto}//${parsed.host}`;
+        } catch {
+          const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+          wsBase = `${wsProtocol}//${window.location.host}`;
+        }
+      } else {
+        const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const host = window.location.hostname || "127.0.0.1";
+        wsBase = `${wsProtocol}//${host}:8000`;
+      }
+
       const currentSeq = lastSequenceRef.current;
-      const wsUrl = `${wsProtocol}//${host}:${port}/ws/v1/sessions/${sessionId}?after_sequence=${currentSeq}`;
+      const apiToken = process.env.NEXT_PUBLIC_API_AUTH_TOKEN || "";
+      let wsUrl = `${wsBase}/ws/v1/sessions/${sessionId}?after_sequence=${currentSeq}`;
+      if (apiToken) {
+        wsUrl += `&token=${encodeURIComponent(apiToken)}`;
+      }
 
       setConnectionState("reconnecting");
       const ws = new WebSocket(wsUrl);
@@ -70,6 +89,11 @@ export function useSessionStream(sessionId?: string | null) {
 
           switch (msg.type) {
             case "session.snapshot":
+              if (msg.watermark_sequence !== undefined) {
+                setSnapshotWatermark(msg.watermark_sequence);
+                lastSequenceRef.current = Math.max(lastSequenceRef.current, msg.watermark_sequence);
+                setLastSequence(lastSequenceRef.current);
+              }
               if (msg.targets && Array.isArray(msg.targets)) {
                 setTargets(msg.targets);
               }

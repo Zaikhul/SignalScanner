@@ -3,12 +3,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.security import verify_operator_auth
 from app.db.models import TargetModel
 from app.db.session import get_db
 from app.schemas.measurement import TargetSummary
 from app.services.session_manager import session_manager
 
-router = APIRouter(prefix="/sessions/{session_id}/targets", tags=["targets"])
+router = APIRouter(prefix="/sessions/{session_id}/targets", tags=["targets"], dependencies=[Depends(verify_operator_auth)])
 
 
 @router.get("", response_model=List[TargetSummary])

@@ -10,9 +10,10 @@ from app.schemas.channel_health import (
     ChannelValidationResponse,
     EvaluateRecommendationRequest,
 )
+from app.core.security import verify_operator_auth
 from app.services.channel_health_service import channel_health_service
 
-router = APIRouter(tags=["channel-health"])
+router = APIRouter(tags=["channel-health"], dependencies=[Depends(verify_operator_auth)])
 
 
 @router.get(

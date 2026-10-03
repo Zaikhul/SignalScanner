@@ -51,22 +51,6 @@ class ChannelHealthService:
         now_utc = datetime.now(timezone.utc)
         window_start = now_utc - timedelta(seconds=window_sec)
 
-        # Query targets for the session
-        t_res = await db.execute(
-            select(TargetModel).where(TargetModel.session_id == session_id)
-        )
-        targets_db = t_res.scalars().all()
-        target_dicts: List[Dict[str, Any]] = []
-        for t in targets_db:
-            target_dicts.append({
-                "target_id": t.target_id,
-                "display_name": t.display_name,
-                "channel": t.channel,
-                "band": t.band,
-                "signal_value": t.metadata_json.get("latest_rssi", -90.0) if t.metadata_json else -90.0,
-                "channel_width_mhz": t.metadata_json.get("channel_width_mhz", 20) if t.metadata_json else 20,
-            })
-
         # Query measurements within the window
         m_res = await db.execute(
             select(MeasurementModel)
@@ -79,7 +63,9 @@ class ChannelHealthService:
         measurements_db = m_res.scalars().all()
         measurement_dicts: List[Dict[str, Any]] = []
         unique_sequences = set()
+        latest_meas_by_target: Dict[str, MeasurementModel] = {}
         for m in measurements_db:
+            latest_meas_by_target[m.target_id] = m
             measurement_dicts.append({
                 "channel": m.channel,
                 "band": m.band,
@@ -90,6 +76,38 @@ class ChannelHealthService:
                 "captured_at": m.captured_at.isoformat() if m.captured_at else None,
             })
             unique_sequences.add(m.sequence)
+
+        # Query targets for the session and filter active ones in the observation window
+        t_res = await db.execute(
+            select(TargetModel).where(TargetModel.session_id == session_id)
+        )
+        all_targets = t_res.scalars().all()
+        target_dicts: List[Dict[str, Any]] = []
+        for t in all_targets:
+            lm = latest_meas_by_target.get(t.target_id)
+            t_last_seen = t.last_seen
+            if t_last_seen and t_last_seen.tzinfo is None:
+                t_last_seen = t_last_seen.replace(tzinfo=timezone.utc)
+            
+            # Exclude targets that have no measurements in window and last_seen is prior to window
+            if not lm and (not t_last_seen or t_last_seen < window_start):
+                continue
+
+            if lm:
+                rssi = lm.signal_value
+                width = (lm.raw_extra or {}).get("channel_width_mhz") or (t.metadata_json or {}).get("channel_width_mhz", 20)
+            else:
+                rssi = (t.metadata_json or {}).get("latest_rssi", -90.0)
+                width = (t.metadata_json or {}).get("channel_width_mhz", 20)
+
+            target_dicts.append({
+                "target_id": t.target_id,
+                "display_name": t.display_name,
+                "channel": t.channel,
+                "band": t.band,
+                "signal_value": rssi,
+                "channel_width_mhz": width,
+            })
 
         scan_cycles = max(len(unique_sequences), 1 if measurement_dicts else 0)
 
@@ -326,24 +344,25 @@ class ChannelHealthService:
 
         if req.marker_id:
             marker = await db.get(SessionMarkerModel, req.marker_id)
-            if marker:
-                marker_label = marker.label
-                ref_time = marker.timestamp
+            if not marker or marker.session_id != session_id:
+                raise ValueError(f"Marker '{req.marker_id}' not found in session '{session_id}'")
+            marker_label = marker.label
+            ref_time = marker.timestamp
 
         before_start = ref_time - timedelta(seconds=req.before_window_sec)
         after_end = ref_time + timedelta(seconds=req.after_window_sec)
 
-        # Query measurements for before window
+        # Query measurements for before window (strictly before ref_time to prevent boundary double-counting)
         q_before = await db.execute(
             select(MeasurementModel).where(
                 MeasurementModel.session_id == session_id,
                 MeasurementModel.captured_at >= before_start,
-                MeasurementModel.captured_at <= ref_time,
+                MeasurementModel.captured_at < ref_time,
             )
         )
         m_before = q_before.scalars().all()
 
-        # Query measurements for after window
+        # Query measurements for after window (from ref_time onward)
         q_after = await db.execute(
             select(MeasurementModel).where(
                 MeasurementModel.session_id == session_id,
@@ -354,9 +373,9 @@ class ChannelHealthService:
         m_after = q_after.scalars().all()
 
         # Helper to summarize metrics from sample list
-        def summarize_samples(samples: List[MeasurementModel]) -> Dict[str, float]:
+        def summarize_samples(samples: List[MeasurementModel]) -> Dict[str, Any]:
             if not samples:
-                return {"mean_rssi": -95.0, "rssi_std": 0.0, "ap_count": 0.0, "count": 0.0}
+                return {"mean_rssi": None, "rssi_std": None, "count": 0.0, "unique_targets": 0.0}
             vals = [s.signal_value for s in samples]
             mean_val = sum(vals) / len(vals)
             var = sum((v - mean_val) ** 2 for v in vals) / len(vals)
@@ -370,42 +389,60 @@ class ChannelHealthService:
         b_metrics = summarize_samples(m_before)
         a_metrics = summarize_samples(m_after)
 
-        # Delta metrics
-        delta_rssi = round(a_metrics["mean_rssi"] - b_metrics["mean_rssi"], 1)
-        delta_std = round(a_metrics["rssi_std"] - b_metrics["rssi_std"], 2)
+        has_sufficient_data = bool(m_before and m_after)
 
-        deltas: Dict[str, MetricDelta] = {
-            "mean_signal_rssi": MetricDelta(
-                before=b_metrics["mean_rssi"],
-                after=a_metrics["mean_rssi"],
-                delta=delta_rssi,
-                improved=delta_rssi > 0,
-            ),
-            "signal_temporal_instability": MetricDelta(
-                before=b_metrics["rssi_std"],
-                after=a_metrics["rssi_std"],
-                delta=delta_std,
-                improved=delta_std < 0,
-            ),
-        }
+        if not has_sufficient_data:
+            deltas: Dict[str, MetricDelta] = {
+                "mean_signal_rssi": MetricDelta(
+                    before=b_metrics["mean_rssi"],
+                    after=a_metrics["mean_rssi"],
+                    delta=None,
+                    improved=None,
+                ),
+                "signal_temporal_instability": MetricDelta(
+                    before=b_metrics["rssi_std"],
+                    after=a_metrics["rssi_std"],
+                    delta=None,
+                    improved=None,
+                ),
+            }
+            summary = "Data tidak mencukupi (insufficient_data): Tidak ada sampel teramati pada window pengamatan sebelum atau sesudah."
+        else:
+            delta_rssi = round(a_metrics["mean_rssi"] - b_metrics["mean_rssi"], 1)
+            delta_std = round(a_metrics["rssi_std"] - b_metrics["rssi_std"], 2)
 
-        # Formulate non-causal observation statement
-        observations: List[str] = []
-        if delta_rssi > 0:
-            observations.append(f"Kekuatan sinyal teramati meningkat {delta_rssi} dB")
-        elif delta_rssi < 0:
-            observations.append(f"Kekuatan sinyal teramati menurun {abs(delta_rssi)} dB")
+            deltas = {
+                "mean_signal_rssi": MetricDelta(
+                    before=b_metrics["mean_rssi"],
+                    after=a_metrics["mean_rssi"],
+                    delta=delta_rssi,
+                    improved=delta_rssi > 0,
+                ),
+                "signal_temporal_instability": MetricDelta(
+                    before=b_metrics["rssi_std"],
+                    after=a_metrics["rssi_std"],
+                    delta=delta_std,
+                    improved=delta_std < 0,
+                ),
+            }
 
-        if delta_std < 0:
-            observations.append("Variansi temporal teramati lebih stabil")
-        elif delta_std > 0:
-            observations.append("Variansi temporal teramati lebih berfluktuasi")
+            # Formulate non-causal observation statement
+            observations: List[str] = []
+            if delta_rssi > 0:
+                observations.append(f"Kekuatan sinyal teramati meningkat {delta_rssi} dB")
+            elif delta_rssi < 0:
+                observations.append(f"Kekuatan sinyal teramati menurun {abs(delta_rssi)} dB")
 
-        summary = (
-            "Perubahan teramati: " + ", ".join(observations)
-            if observations
-            else "Tidak ada perubahan signifikan teramati pada window perbandingan"
-        )
+            if delta_std < 0:
+                observations.append("Variansi temporal teramati lebih stabil")
+            elif delta_std > 0:
+                observations.append("Variansi temporal teramati lebih berfluktuasi")
+
+            summary = (
+                "Perubahan teramati: " + ", ".join(observations)
+                if observations
+                else "Tidak ada perubahan signifikan teramati pada window perbandingan"
+            )
 
         val_id = f"chv_{uuid.uuid4().hex[:12]}"
         val_model = ChannelValidationRunModel(

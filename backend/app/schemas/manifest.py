@@ -6,9 +6,9 @@ from pydantic import BaseModel, Field
 
 
 class ClockQuality(BaseModel):
-    offset_ms: float = Field(default=0.0, description="Estimated clock offset against reference in ms")
-    uncertainty_ms: float = Field(default=0.0, description="Clock uncertainty in ms")
-    source: str = Field(default="system_monotonic", description="Clock synchronization source (e.g. system_monotonic, ntp, ptp)")
+    offset_ms: Optional[float] = Field(default=None, description="Estimated clock offset against reference in ms")
+    uncertainty_ms: Optional[float] = Field(default=None, description="Clock uncertainty in ms")
+    source: str = Field(default="unknown", description="Clock synchronization source (e.g. system_monotonic, ntp, ptp, unknown)")
 
 
 class SequenceSummary(BaseModel):
@@ -39,9 +39,6 @@ class SessionProvenanceManifest(BaseModel):
 
     def compute_checksum(self) -> str:
         """Computes deterministic SHA256 checksum of manifest fields (excluding manifest_checksum itself)."""
-        data = self.model_dump(exclude={"manifest_checksum"})
-        # Format datetime to isoformat
-        if "created_at" in data and isinstance(data["created_at"], datetime):
-            data["created_at"] = data["created_at"].isoformat()
-        canonical_json = json.dumps(data, sort_keys=True, default=str)
+        data = self.model_dump(mode="json", exclude={"manifest_checksum"})
+        canonical_json = json.dumps(data, sort_keys=True)
         return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()

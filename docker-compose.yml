@@ -6,11 +6,11 @@ services:
     container_name: SignalScannerDB
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: SignalScanner
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-SignalScanner}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - timescale_data:/var/lib/postgresql/data
     healthcheck:
@@ -24,7 +24,7 @@ services:
     container_name: SignalScannerRedis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -40,10 +40,12 @@ services:
     container_name: BE_SignalScanner
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@timescaledb:5432/SignalScanner
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@timescaledb:5432/${POSTGRES_DB:-SignalScanner}
       STREAM_BACKEND: redis
       REDIS_URL: redis://redis:6379/0
       ALLOWED_ORIGINS: '["http://localhost:3000", "http://127.0.0.1:3000"]'
+      API_AUTH_TOKEN: ${API_AUTH_TOKEN:-signal-scanner-dev-token-2026}
+      COLLECTOR_API_KEY: ${COLLECTOR_API_KEY:-collector-dev-key-2026}
     ports:
       - "8000:8000"
     healthcheck:
@@ -65,8 +67,10 @@ services:
     restart: unless-stopped
     environment:
       BACKEND_URL: http://backend:8000
+      API_AUTH_TOKEN: ${API_AUTH_TOKEN:-signal-scanner-dev-token-2026}
+      COLLECTOR_API_KEY: ${COLLECTOR_API_KEY:-collector-dev-key-2026}
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     depends_on:
       backend:
         condition: service_healthy
@@ -75,10 +79,16 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_API_AUTH_TOKEN: ${NEXT_PUBLIC_API_AUTH_TOKEN:-signal-scanner-dev-token-2026}
+        NEXT_PUBLIC_LOCAL_COLLECTOR_TOKEN: ${NEXT_PUBLIC_LOCAL_COLLECTOR_TOKEN:-signal-scanner-local-agent-token-2026}
     container_name: FE_SignalScanner
     restart: unless-stopped
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      NEXT_PUBLIC_API_AUTH_TOKEN: ${NEXT_PUBLIC_API_AUTH_TOKEN:-signal-scanner-dev-token-2026}
+      NEXT_PUBLIC_LOCAL_COLLECTOR_TOKEN: ${NEXT_PUBLIC_LOCAL_COLLECTOR_TOKEN:-signal-scanner-local-agent-token-2026}
     ports:
       - "3000:3000"
     depends_on:

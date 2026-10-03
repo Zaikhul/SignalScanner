@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 import uuid
+from xml.sax.saxutils import escape as xml_escape
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from collector.app.core.association_base import (
@@ -460,13 +461,18 @@ class WindowsWiFiAssociationAdapter:
 
     @staticmethod
     def _build_profile_xml(profile_name: str, ssid: str, sec: str, password: Optional[str]) -> str:
+        entities = {'"': "&quot;", "'": "&apos;"}
+        escaped_profile = xml_escape(profile_name or "", entities=entities)
+        escaped_ssid = xml_escape(ssid or "", entities=entities)
+        escaped_pwd = xml_escape(password or "", entities=entities)
+
         if sec in ("open", "none"):
             return f"""<?xml version="1.0"?>
 <WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
-    <name>{profile_name}</name>
+    <name>{escaped_profile}</name>
     <SSIDConfig>
         <SSID>
-            <name>{ssid}</name>
+            <name>{escaped_ssid}</name>
         </SSID>
     </SSIDConfig>
     <connectionType>ESS</connectionType>
@@ -483,13 +489,12 @@ class WindowsWiFiAssociationAdapter:
 </WLANProfile>"""
 
         elif "wpa3" in sec or "sae" in sec:
-            pwd = password or ""
             return f"""<?xml version="1.0"?>
 <WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
-    <name>{profile_name}</name>
+    <name>{escaped_profile}</name>
     <SSIDConfig>
         <SSID>
-            <name>{ssid}</name>
+            <name>{escaped_ssid}</name>
         </SSID>
     </SSIDConfig>
     <connectionType>ESS</connectionType>
@@ -504,7 +509,7 @@ class WindowsWiFiAssociationAdapter:
             <sharedKey>
                 <keyType>passPhrase</keyType>
                 <protected>false</protected>
-                <keyMaterial>{pwd}</keyMaterial>
+                <keyMaterial>{escaped_pwd}</keyMaterial>
             </sharedKey>
         </security>
     </MSM>
@@ -512,13 +517,12 @@ class WindowsWiFiAssociationAdapter:
 
         else:
             # Default to WPA2-Personal (WPA2PSK)
-            pwd = password or ""
             return f"""<?xml version="1.0"?>
 <WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
-    <name>{profile_name}</name>
+    <name>{escaped_profile}</name>
     <SSIDConfig>
         <SSID>
-            <name>{ssid}</name>
+            <name>{escaped_ssid}</name>
         </SSID>
     </SSIDConfig>
     <connectionType>ESS</connectionType>
@@ -533,7 +537,7 @@ class WindowsWiFiAssociationAdapter:
             <sharedKey>
                 <keyType>passPhrase</keyType>
                 <protected>false</protected>
-                <keyMaterial>{pwd}</keyMaterial>
+                <keyMaterial>{escaped_pwd}</keyMaterial>
             </sharedKey>
         </security>
     </MSM>

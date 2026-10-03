@@ -40,15 +40,12 @@ node_modules/
 out/
 build/
 dist/
-.vite/
-tests/
 *.tsbuildinfo
 .pnpm-store/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-pnpm-lock.yaml
 
 __pycache__/
 *.py[cod]
@@ -81,8 +78,6 @@ models/binaries/
 *.parquet
 *.ubj
 
-PRD_*.md
-
 # Windows
 Thumbs.db
 ehthumbs.db
@@ -93,6 +88,3 @@ logs/
 *.log
 *.tmp
 *.bak
-
-*.bat
-*.ps1

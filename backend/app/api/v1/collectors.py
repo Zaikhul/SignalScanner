@@ -13,10 +13,11 @@ from app.schemas.collector import (
     DiagnosticCommand,
     DiagnosticResult,
 )
+from app.core.security import verify_collector_auth
 from app.schemas.diagnostics import DiagnosticCheckItem, DiagnosticStatus, PreflightDiagnosticResult
 from app.services.collector_service import collector_service
 
-router = APIRouter(prefix="/collectors", tags=["collectors"])
+router = APIRouter(prefix="/collectors", tags=["collectors"], dependencies=[Depends(verify_collector_auth)])
 
 # In-memory latest preflight results cache: {collector_id: PreflightDiagnosticResult}
 _latest_preflight_results: Dict[str, PreflightDiagnosticResult] = {}

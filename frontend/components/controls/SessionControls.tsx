@@ -55,21 +55,26 @@ export function SessionControls() {
         const freshCollectors = await apiClient.listCollectors();
         setCollectors(freshCollectors);
 
-        // Find a collector that is actually alive (status ready or busy)
-        const activeCollector = freshCollectors.find(
-          (c) => c.status === "ready" || c.status === "busy"
-        );
+        // Resolve user's selected collector from the refreshed list
+        const chosenCollector = freshCollectors.find((c) => c.id === selectedCollectorId);
 
-        if (!activeCollector) {
+        if (!chosenCollector) {
           throw new Error(
-            "Collector Hardware tidak terhubung atau offline.\n\n" +
-            "Jalankan daemon collector lokal terlebih dahulu:\n" +
+            `Collector '${selectedCollectorId}' tidak ditemukan di sistem.\n\n` +
+            "Pastikan daemon collector lokal telah dijalankan:\n" +
             `  python -m collector.app.main --mode ${mode}\n\n` +
-            "atau aktifkan toggle 'Mode Simulasi' di panel kiri."
+            "atau pilih collector yang tersedia dari menu Collector, atau aktifkan 'Mode Simulasi'."
           );
         }
 
-        const collectorId = activeCollector.id;
+        if (chosenCollector.status === "offline") {
+          throw new Error(
+            `Collector terpilih '${chosenCollector.name || chosenCollector.id}' sedang OFFLINE.\n\n` +
+            "Jalankan daemon collector lokal terlebih dahulu atau periksa koneksinya."
+          );
+        }
+
+        const collectorId = chosenCollector.id;
 
         const session = await apiClient.createSession({
           name: `Sesi ${mode.toUpperCase()} [Hardware] - ${new Date().toLocaleTimeString()}`,

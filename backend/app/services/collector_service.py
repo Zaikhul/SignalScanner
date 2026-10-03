@@ -89,13 +89,19 @@ class CollectorService:
             collector.last_seen = datetime.now(timezone.utc)
             collector.status = CollectorStatus.READY.value
 
-        # Register or update adapters
+        # Register or update adapters namespaced by collector_id
         for adap in payload.capabilities.adapters:
-            res_adap = await db.execute(select(AdapterModel).where(AdapterModel.id == adap.id))
+            namespaced_id = f"{collector.id}:{adap.id}"
+            res_adap = await db.execute(
+                select(AdapterModel).where(
+                    AdapterModel.id == namespaced_id,
+                    AdapterModel.collector_id == collector.id,
+                )
+            )
             existing_adap = res_adap.scalar_one_or_none()
             if not existing_adap:
                 new_adap = AdapterModel(
-                    id=adap.id,
+                    id=namespaced_id,
                     collector_id=collector.id,
                     type=adap.type.value if hasattr(adap.type, "value") else str(adap.type),
                     name=adap.name,

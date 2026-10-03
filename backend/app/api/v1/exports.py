@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.security import verify_operator_auth
 from app.db.session import get_db
 from app.schemas.export import ExportRequest, ExportResponse
 from app.services.export_service import export_service
 
-router = APIRouter(tags=["exports"])
+router = APIRouter(tags=["exports"], dependencies=[Depends(verify_operator_auth)])
 
 
 @router.post("/sessions/{session_id}/exports", response_model=ExportResponse)

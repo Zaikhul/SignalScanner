@@ -12,9 +12,10 @@ from app.schemas.association import (
     IngestHostBatchRequest,
     LanHostListResponse,
 )
+from app.core.security import verify_collector_auth
 from app.services.association_service import association_service
 
-router = APIRouter(tags=["associations"])
+router = APIRouter(tags=["associations"], dependencies=[Depends(verify_collector_auth)])
 
 
 @router.post(

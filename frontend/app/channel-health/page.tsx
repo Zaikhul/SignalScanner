@@ -1,12 +1,14 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { Header } from "@/components/layout/Header";
 import { ChannelRecommendationCard } from "@/components/channel/ChannelRecommendationCard";
 import { ChannelHealthMatrix } from "@/components/channel/ChannelHealthMatrix";
 import { ChannelEvidenceDrawer } from "@/components/channel/ChannelEvidenceDrawer";
 import { ChannelComparison } from "@/components/channel/ChannelComparison";
 import { useScannerStore } from "@/lib/store";
+import { apiClient } from "@/lib/apiClient";
 import { Sparkle, Sliders, Broadcast, ArrowsClockwise } from "@phosphor-icons/react";
 
 export default function ChannelHealthPage() {
@@ -30,74 +32,57 @@ export default function ChannelHealthPage() {
   const sessionId = activeSession?.id;
 
   // Fetch or evaluate channel health on mount / session / band change
-  const fetchChannelHealth = async () => {
+  const fetchChannelHealth = useCallback(async () => {
     if (!sessionId) return;
     setIsLoading(true);
     setErrorMsg(null);
     try {
-      const resHealth = await fetch(
-        `http://127.0.0.1:8000/api/v1/sessions/${sessionId}/channel-health?band=${activeBand}`
-      );
-      if (resHealth.ok) {
-        const snap = await resHealth.json();
+      try {
+        const snap = await apiClient.getChannelHealth(sessionId, activeBand);
         setChannelHealthSnapshot(snap);
+      } catch {
+        // If not yet generated, ignore
       }
 
-      const resRec = await fetch(
-        `http://127.0.0.1:8000/api/v1/sessions/${sessionId}/channel-recommendations/latest`
-      );
-      if (resRec.ok) {
-        const rec = await resRec.json();
+      try {
+        const rec = await apiClient.getLatestRecommendation(sessionId);
         setLatestRecommendation(rec);
+      } catch {
+        // If no recommendation yet, ignore
       }
 
-      const resVal = await fetch(
-        `http://127.0.0.1:8000/api/v1/sessions/${sessionId}/channel-validations`
-      );
-      if (resVal.ok) {
-        const vals = await resVal.json();
+      try {
+        const vals = await apiClient.listChannelValidations(sessionId);
         setChannelValidations(vals);
+      } catch {
+        // If no validations yet, ignore
       }
     } catch (err: any) {
       setErrorMsg(err.message || "Gagal memuat data Channel Health");
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [sessionId, activeBand, setChannelHealthSnapshot, setLatestRecommendation, setChannelValidations]);
 
   useEffect(() => {
     fetchChannelHealth();
-  }, [sessionId, activeBand]);
+  }, [fetchChannelHealth]);
 
   const handleEvaluate = async () => {
     if (!sessionId) return;
     setIsLoading(true);
     setErrorMsg(null);
     try {
-      const res = await fetch(
-        `http://127.0.0.1:8000/api/v1/sessions/${sessionId}/channel-recommendations/evaluate`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            band: activeBand,
-            channel_width_mhz: 20,
-            observation_window_sec: windowSec,
-            regulatory_domain: regulatoryDomain,
-          }),
-        }
-      );
-      if (res.ok) {
-        const rec = await res.json();
-        setLatestRecommendation(rec);
-        // Refresh snapshot
-        await fetchChannelHealth();
-      } else {
-        const err = await res.json();
-        setErrorMsg(err.detail || "Evaluasi gagal");
-      }
+      const rec = await apiClient.evaluateChannelRecommendation(sessionId, {
+        band: activeBand,
+        channel_width_mhz: 20,
+        observation_window_sec: windowSec,
+        regulatory_domain: regulatoryDomain,
+      });
+      setLatestRecommendation(rec);
+      await fetchChannelHealth();
     } catch (err: any) {
-      setErrorMsg(err.message || "Gagal menghubungi backend");
+      setErrorMsg(err.message || "Evaluasi gagal");
     } finally {
       setIsLoading(false);
     }
@@ -107,22 +92,12 @@ export default function ChannelHealthPage() {
     if (!sessionId) return;
     setIsLoading(true);
     try {
-      const res = await fetch(
-        `http://127.0.0.1:8000/api/v1/sessions/${sessionId}/channel-validations`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            marker_id: markerId || null,
-            before_window_sec: before || 60,
-            after_window_sec: after || 60,
-          }),
-        }
-      );
-      if (res.ok) {
-        const val = await res.json();
-        addChannelValidation(val);
-      }
+      const val = await apiClient.triggerChannelValidation(sessionId, {
+        marker_id: markerId || null,
+        before_window_sec: before || 60,
+        after_window_sec: after || 60,
+      });
+      addChannelValidation(val);
     } catch (err) {
       console.error(err);
     } finally {
@@ -227,12 +202,12 @@ export default function ChannelHealthPage() {
             <p className="text-xs text-zinc-400 max-w-md mx-auto">
               Silakan buat atau aktifkan sesi Live Scan di halaman utama untuk mulai mengumpulkan data telemetri kanal WiFi.
             </p>
-            <a
+            <Link
               href="/"
               className="inline-flex min-h-9 items-center justify-center rounded-[var(--radius-control)] bg-[var(--color-signal)] px-4 text-xs font-semibold text-zinc-950"
             >
               Buka Live Scan
-            </a>
+            </Link>
           </div>
         ) : (
           <div className="space-y-6">

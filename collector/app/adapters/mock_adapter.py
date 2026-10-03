@@ -66,8 +66,11 @@ class MockSignalAdapter(SignalAdapter):
     async def start(self, config: ScanConfig) -> AsyncIterator[Dict[str, Any]]:
         self._running = True
         interval = max(0.2, config.sample_interval_ms / 1000.0)
+        start_time = asyncio.get_event_loop().time()
 
         while self._running:
+            if config.duration_seconds and (asyncio.get_event_loop().time() - start_time) >= config.duration_seconds:
+                break
             self._seq += 1
             batch = self._generate_batch(config)
             yield batch
@@ -108,6 +111,9 @@ class MockSignalAdapter(SignalAdapter):
                         "calibrated": False,
                         "permission_limited": False,
                         "throttled": False,
+                        "freshness": "simulated",
+                        "source_method": "virtual_simulator",
+                        "rssi_processing": "synthetic",
                     },
                     "extra_metadata": {
                         "security": "WPA3-Personal" if "WiFi6" in ap["ssid"] else "WPA2-Enterprise",
@@ -140,6 +146,9 @@ class MockSignalAdapter(SignalAdapter):
                         "calibrated": False,
                         "permission_limited": False,
                         "throttled": False,
+                        "freshness": "simulated",
+                        "source_method": "virtual_simulator",
+                        "rssi_processing": "synthetic",
                     },
                     "extra_metadata": {
                         "manufacturer": ble["mfg"],
@@ -170,7 +179,7 @@ class MockSignalAdapter(SignalAdapter):
 
             max_power = round(float(np.max(bins)), 1)
             measurements.append({
-                "schema_version": "1.0",
+                "schema_version": "2.0",
                 "session_id": config.session_id,
                 "collector_id": collector_settings.COLLECTOR_ID,
                 "sequence": self._seq,
@@ -193,15 +202,18 @@ class MockSignalAdapter(SignalAdapter):
                     "calibrated": False,
                     "permission_limited": False,
                     "throttled": False,
+                    "freshness": "simulated",
+                    "source_method": "virtual_simulator",
+                    "rssi_processing": "synthetic",
                 },
                 "extra_metadata": {}
             })
 
         return {
-            "schema_version": "1.0",
+            "schema_version": "2.0",
             "session_id": config.session_id,
             "collector_id": collector_settings.COLLECTOR_ID,
-            "source_type": "collector",
+            "source_type": "simulator",
             "sequence_from": self._seq,
             "sequence_to": self._seq,
             "sent_at": now_iso,

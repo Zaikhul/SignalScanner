@@ -2,7 +2,9 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import statistics
 from typing import Any, Dict, List, Optional, Tuple
+from fastapi import HTTPException, status
 import numpy as np
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -90,14 +92,26 @@ class SessionManager:
     async def start_session(db: AsyncSession, session_id: str) -> SessionResponse:
         session = await db.get(ScanSessionModel, session_id)
         if not session:
-            raise ValueError(f"Session {session_id} not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Session {session_id} not found")
+
+        # Legal origins: draft, starting.
+        # If already active: idempotent return
+        if session.status == SessionStatus.ACTIVE.value:
+            return await SessionManager.get_session_response(db, session_id)
+
+        # Illegal origins: completed, stopped, failed
+        if session.status in (SessionStatus.COMPLETED.value, SessionStatus.STOPPED.value, SessionStatus.FAILED.value):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot start session '{session_id}' in state '{session.status}'. Completed sessions cannot be reopened; create a new session.",
+            )
 
         session.status = SessionStatus.ACTIVE.value
         session.started_at = datetime.now(timezone.utc)
         await db.commit()
         await db.refresh(session)
 
-        # If session is bound to a hardware collector, queue start_scan command
+        # If session is bound to a hardware collector, queue start_scan command with full parameters
         if getattr(session, "source_type", "collector") == "collector" and session.collector_id:
             sample_interval = 500
             if session.config and isinstance(session.config, dict):
@@ -108,6 +122,7 @@ class SessionManager:
                 session_id=session.id,
                 mode=ScanMode(session.mode) if session.mode in ScanMode._value2member_map_ else ScanMode.WIFI,
                 sample_interval_ms=sample_interval,
+                parameters=session.config or {},
             )
 
         # Notify via Stream Engine
@@ -128,7 +143,16 @@ class SessionManager:
     async def pause_session(db: AsyncSession, session_id: str) -> SessionResponse:
         session = await db.get(ScanSessionModel, session_id)
         if not session:
-            raise ValueError(f"Session {session_id} not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Session {session_id} not found")
+
+        if session.status == SessionStatus.PAUSED.value:
+            return await SessionManager.get_session_response(db, session_id)
+
+        if session.status != SessionStatus.ACTIVE.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot pause session '{session_id}' in state '{session.status}'. Must be active.",
+            )
 
         session.status = SessionStatus.PAUSED.value
         await db.commit()
@@ -158,7 +182,16 @@ class SessionManager:
     async def resume_session(db: AsyncSession, session_id: str) -> SessionResponse:
         session = await db.get(ScanSessionModel, session_id)
         if not session:
-            raise ValueError(f"Session {session_id} not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Session {session_id} not found")
+
+        if session.status == SessionStatus.ACTIVE.value:
+            return await SessionManager.get_session_response(db, session_id)
+
+        if session.status != SessionStatus.PAUSED.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot resume session '{session_id}' in state '{session.status}'. Must be paused.",
+            )
 
         session.status = SessionStatus.ACTIVE.value
         await db.commit()
@@ -170,10 +203,11 @@ class SessionManager:
                 sample_interval = session.config.get("sample_interval_ms", 500)
             collector_service.queue_command(
                 collector_id=session.collector_id,
-                type="start_scan",
+                type="resume_scan",
                 session_id=session.id,
                 mode=ScanMode(session.mode) if session.mode in ScanMode._value2member_map_ else ScanMode.WIFI,
                 sample_interval_ms=sample_interval,
+                parameters=session.config or {},
             )
 
         await stream_engine.publish_event(
@@ -193,10 +227,17 @@ class SessionManager:
     async def stop_session(db: AsyncSession, session_id: str) -> SessionResponse:
         session = await db.get(ScanSessionModel, session_id)
         if not session:
-            raise ValueError(f"Session {session_id} not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Session {session_id} not found")
+
+        # Idempotency check: if already completed or stopped, return existing response without duplicating manifest
+        if session.status in (SessionStatus.COMPLETED.value, SessionStatus.STOPPED.value):
+            return await SessionManager.get_session_response(db, session_id)
 
         session.status = SessionStatus.COMPLETED.value
         session.ended_at = datetime.now(timezone.utc)
+
+        # Clear EMA state for this session (F-23)
+        signal_processor.reset_session_ema(session_id)
 
         if getattr(session, "source_type", "collector") == "collector" and session.collector_id:
             collector_service.queue_command(
@@ -205,7 +246,7 @@ class SessionManager:
                 session_id=session.id,
             )
 
-        # 1. Compute Sequence Summary & Checksum for Provenance Manifest (PROV-01)
+        # 1. Compute Sequence Summary & Checksum for Provenance Manifest (PROV-01, F-19)
         res_seq = await db.execute(
             select(
                 func.count(MeasurementModel.id),
@@ -214,6 +255,22 @@ class SessionManager:
             ).where(MeasurementModel.session_id == session_id)
         )
         total_count, min_seq, max_seq = res_seq.one()
+
+        # Compute distinct sequence cycles and missing ranges
+        res_distinct_seqs = await db.execute(
+            select(MeasurementModel.sequence)
+            .where(MeasurementModel.session_id == session_id)
+            .distinct()
+            .order_by(MeasurementModel.sequence.asc())
+        )
+        distinct_seqs = [r[0] for r in res_distinct_seqs.all()]
+        missing_ranges: List[List[int]] = []
+        if distinct_seqs:
+            for i in range(len(distinct_seqs) - 1):
+                gap_start = distinct_seqs[i] + 1
+                gap_end = distinct_seqs[i + 1] - 1
+                if gap_start <= gap_end:
+                    missing_ranges.append([gap_start, gap_end])
 
         res_col = await db.get(CollectorModel, session.collector_id) if session.collector_id else None
 
@@ -227,14 +284,14 @@ class SessionManager:
             scan_config=session.config or {},
             processing_version="signal-pipeline@2.0",
             processing_config_hash=hashlib.sha256(json.dumps(session.config or {}, sort_keys=True).encode()).hexdigest(),
-            clock=ClockQuality(offset_ms=0.0, uncertainty_ms=2.0, source="system_monotonic"),
+            clock=ClockQuality(offset_ms=None, uncertainty_ms=None, source="unknown"),
             privacy_policy_id="privacy-hmac-v1",
             schema_version="measurement@2.0",
             sequence_summary=SequenceSummary(
                 first_sequence=min_seq or 0,
                 last_sequence=max_seq or 0,
                 total_received=total_count or 0,
-                missing_ranges=[],
+                missing_ranges=missing_ranges,
             ),
             created_at=session.ended_at,
         )
@@ -354,6 +411,25 @@ class SessionManager:
                         f"MODE_MISMATCH: Batch measurement mode '{m_mode}' does not match session mode '{session.mode}'"
                     )
 
+        # Check privacy mask_ssid configuration (F-20)
+        mask_ssid = False
+        if session.config and isinstance(session.config, dict):
+            priv = session.config.get("privacy_config", {})
+            if isinstance(priv, dict) and priv.get("mask_ssid"):
+                mask_ssid = True
+            elif session.config.get("mask_ssid"):
+                mask_ssid = True
+
+        # Deduplication against already persisted measurements in this sequence range (F-06)
+        res_existing = await db.execute(
+            select(MeasurementModel.sequence, MeasurementModel.target_id).where(
+                MeasurementModel.session_id == batch.session_id,
+                MeasurementModel.sequence >= batch.sequence_from,
+                MeasurementModel.sequence <= batch.sequence_to,
+            )
+        )
+        existing_pairs = set(res_existing.all())
+
         processed_events: List[Dict[str, Any]] = []
         batch_target_dicts: List[Dict[str, Any]] = []
 
@@ -363,8 +439,15 @@ class SessionManager:
                 target_id = pseudonymize_identifier(target_id)
                 m.target_id = target_id
 
-            # Apply EMA smoothing
-            smoothed = signal_processor.calculate_ema(target_id, m.signal.value)
+            # Apply mask_ssid if configured (F-20)
+            if mask_ssid and m.display_name:
+                if len(m.display_name) > 3:
+                    m.display_name = f"***{m.display_name[-3:]}"
+                else:
+                    m.display_name = "***"
+
+            # Apply EMA smoothing scoped to session (F-23)
+            smoothed = signal_processor.calculate_ema(target_id, m.signal.value, session_id=batch.session_id)
             m.signal.smoothed_value = smoothed
 
             # Calculate SNR if noise is available or compute from floor
@@ -383,8 +466,14 @@ class SessionManager:
             chan = m.radio.channel if m.radio else None
             band = m.radio.band if m.radio else None
             freq = m.radio.frequency_hz if m.radio else None
+            width_mhz = m.radio.channel_width_mhz if m.radio and m.radio.channel_width_mhz else None
 
             if not target:
+                init_meta = dict(m.extra_metadata or {})
+                init_meta["latest_rssi"] = m.signal.value
+                if width_mhz:
+                    init_meta["channel_width_mhz"] = width_mhz
+
                 target = TargetModel(
                     id=f"tgt_{target_id[-10:]}_{batch.session_id[-6:]}",
                     session_id=batch.session_id,
@@ -395,7 +484,7 @@ class SessionManager:
                     band=band,
                     first_seen=m.captured_at,
                     last_seen=m.captured_at,
-                    metadata_json=m.extra_metadata or {},
+                    metadata_json=init_meta,
                 )
                 db.add(target)
                 await db.flush()
@@ -407,6 +496,11 @@ class SessionManager:
                     target.channel = chan
                 if band:
                     target.band = band
+                target_meta = dict(target.metadata_json or {})
+                target_meta["latest_rssi"] = m.signal.value
+                if width_mhz:
+                    target_meta["channel_width_mhz"] = width_mhz
+                target.metadata_json = target_meta
 
             # Extract FQ-01 quality attributes
             q = m.quality
@@ -416,29 +510,36 @@ class SessionManager:
             source_method = getattr(q, "source_method", "unknown")
             rssi_processing = getattr(q, "rssi_processing", "unknown")
 
-            # Create Measurement record
-            meas = MeasurementModel(
-                session_id=batch.session_id,
-                target_id=target_id,
-                target_db_id=target.id,
-                sequence=m.sequence,
-                captured_at=m.captured_at,
-                signal_value=m.signal.value,
-                unit=m.signal.unit,
-                noise_floor=m.signal.noise,
-                snr=m.signal.snr,
-                frequency_hz=freq,
-                channel=chan,
-                band=band,
-                scan_id=scan_id,
-                trace_id=trace_id,
-                freshness=freshness,
-                source_method=source_method,
-                rssi_processing=rssi_processing,
-                quality_flags=q.model_dump(mode="json") if hasattr(q, "model_dump") else {},
-                raw_extra=m.extra_metadata or {},
-            )
-            db.add(meas)
+            # Create Measurement record with idempotency deduplication (F-06)
+            meas_pair = (m.sequence, target_id)
+            if meas_pair not in existing_pairs:
+                existing_pairs.add(meas_pair)
+                meas_extra = dict(m.extra_metadata or {})
+                if width_mhz:
+                    meas_extra["channel_width_mhz"] = width_mhz
+
+                meas = MeasurementModel(
+                    session_id=batch.session_id,
+                    target_id=target_id,
+                    target_db_id=target.id,
+                    sequence=m.sequence,
+                    captured_at=m.captured_at,
+                    signal_value=m.signal.value,
+                    unit=m.signal.unit,
+                    noise_floor=m.signal.noise,
+                    snr=m.signal.snr,
+                    frequency_hz=freq,
+                    channel=chan,
+                    band=band,
+                    scan_id=scan_id,
+                    trace_id=trace_id,
+                    freshness=freshness,
+                    source_method=source_method,
+                    rssi_processing=rssi_processing,
+                    quality_flags=q.model_dump(mode="json") if hasattr(q, "model_dump") else {},
+                    raw_extra=meas_extra,
+                )
+                db.add(meas)
 
             event_dict = m.model_dump(mode="json")
             processed_events.append(event_dict)
@@ -448,6 +549,7 @@ class SessionManager:
                 "signal_value": m.signal.value,
                 "channel": chan,
                 "band": band,
+                "channel_width_mhz": width_mhz,
             })
 
         # Calculate and store CHAN-01 channel metrics
@@ -491,16 +593,24 @@ class SessionManager:
     async def get_session_manifest(
         db: AsyncSession, session_id: str
     ) -> Optional[SessionProvenanceManifest]:
-        """Retrieves and verifies the cryptographic session manifest (PROV-01)."""
+        """Retrieves and verifies the cryptographic session manifest (PROV-01, F-12, F-19)."""
         res = await db.execute(
             select(SessionManifestModel)
             .where(SessionManifestModel.session_id == session_id)
             .order_by(SessionManifestModel.created_at.desc())
+            .limit(1)
         )
         row = res.scalar_one_or_none()
         if not row:
             return None
-        return SessionProvenanceManifest(**row.manifest_json)
+        manifest = SessionProvenanceManifest(**row.manifest_json)
+        computed = manifest.compute_checksum()
+        if row.checksum_sha256 != computed or manifest.manifest_checksum != computed:
+            raise ValueError(
+                f"Session manifest checksum verification failed for session '{session_id}'. "
+                f"Stored: {row.checksum_sha256}, computed: {computed}"
+            )
+        return manifest
 
     @staticmethod
     async def get_session_response(
@@ -542,26 +652,47 @@ class SessionManager:
                 end_t = end_t.replace(tzinfo=timezone.utc)
             duration = max(0.0, (end_t - start_t).total_seconds())
 
+        # Query all signal values for true session median calculation (F-22)
+        res_all_signals = await db.execute(
+            select(MeasurementModel.signal_value).where(MeasurementModel.session_id == session_id)
+        )
+        all_signals = [r[0] for r in res_all_signals.all()]
+        med_session_signal = round(float(statistics.median(all_signals)), 1) if all_signals else None
+
         summary = SessionSummary(
             total_samples=count or 0,
             unique_targets=unique_targets,
             min_signal=round(min_val, 1) if min_val is not None else None,
             max_signal=round(max_val, 1) if max_val is not None else None,
-            median_signal=None,
+            median_signal=med_session_signal,
             noise_floor_estimate=round(avg_noise, 1) if avg_noise is not None else -95.0,
             duration_seconds=round(duration, 1),
         )
 
-        marker_resps = [
-            SessionMarkerResponse(
-                id=m.id,
-                session_id=m.session_id,
-                label=m.label,
-                notes=m.notes,
-                timestamp=m.timestamp,
+        marker_resps = []
+        for m in session.markers:
+            m_ts = m.timestamp
+            if m_ts and m_ts.tzinfo is None:
+                m_ts = m_ts.replace(tzinfo=timezone.utc)
+            marker_resps.append(
+                SessionMarkerResponse(
+                    id=m.id,
+                    session_id=m.session_id,
+                    label=m.label,
+                    notes=m.notes,
+                    timestamp=m_ts,
+                )
             )
-            for m in session.markers
-        ]
+
+        created_at = session.created_at
+        if created_at and created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        started_at = session.started_at
+        if started_at and started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        ended_at = session.ended_at
+        if ended_at and ended_at.tzinfo is None:
+            ended_at = ended_at.replace(tzinfo=timezone.utc)
 
         return SessionResponse(
             id=session.id,
@@ -572,9 +703,9 @@ class SessionManager:
             status=SessionStatus(session.status) if session.status in SessionStatus._value2member_map_ else SessionStatus.DRAFT,
             config=session.config,
             tags=session.tags,
-            started_at=session.started_at,
-            ended_at=session.ended_at,
-            created_at=session.created_at,
+            started_at=started_at,
+            ended_at=ended_at,
+            created_at=created_at,
             summary=summary,
             markers=marker_resps,
         )
@@ -634,14 +765,22 @@ class SessionManager:
                     func.count(MeasurementModel.id),
                     func.min(MeasurementModel.signal_value),
                     func.max(MeasurementModel.signal_value),
-                    func.avg(MeasurementModel.signal_value),
                     func.avg(MeasurementModel.snr),
                 ).where(
                     MeasurementModel.session_id == session_id,
                     MeasurementModel.target_id == t.target_id,
                 )
             )
-            count, min_s, max_s, avg_s, avg_snr = res_stats.one()
+            count, min_s, max_s, avg_snr = res_stats.one()
+
+            # Query all signals for target to calculate true mathematical median (F-22)
+            res_sig = await db.execute(
+                select(MeasurementModel.signal_value).where(
+                    MeasurementModel.session_id == session_id,
+                    MeasurementModel.target_id == t.target_id,
+                )
+            )
+            sig_vals = [r[0] for r in res_sig.all()]
 
             # Query latest measurement
             res_latest = await db.execute(
@@ -656,23 +795,31 @@ class SessionManager:
             latest_m = res_latest.scalar_one_or_none()
 
             latest_val = latest_m.signal_value if latest_m else -80.0
+            med_s = round(float(statistics.median(sig_vals)), 1) if sig_vals else latest_val
             unit_val = latest_m.unit if latest_m else "dBm"
             freshness_val = latest_m.freshness if latest_m else "fresh"
             source_method_val = latest_m.source_method if latest_m else "unknown"
+
+            first_seen = t.first_seen
+            if first_seen and first_seen.tzinfo is None:
+                first_seen = first_seen.replace(tzinfo=timezone.utc)
+            last_seen = t.last_seen
+            if last_seen and last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
 
             summaries.append(
                 TargetSummary(
                     target_id=t.target_id,
                     display_name=t.display_name,
                     mode=ScanMode(t.mode) if t.mode in ScanMode._value2member_map_ else ScanMode.WIFI,
-                    first_seen=t.first_seen,
-                    last_seen=t.last_seen,
+                    first_seen=first_seen,
+                    last_seen=last_seen,
                     sample_count=count or 1,
                     latest_signal=latest_val,
                     unit=unit_val,
                     min_signal=min_s if min_s is not None else latest_val,
                     max_signal=max_s if max_s is not None else latest_val,
-                    median_signal=avg_s if avg_s is not None else latest_val,
+                    median_signal=med_s,
                     avg_snr=round(avg_snr, 1) if avg_snr is not None else None,
                     channel=t.channel,
                     band=t.band,

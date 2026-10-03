@@ -1,9 +1,11 @@
 import asyncio
 from datetime import datetime, timezone
+from typing import Optional
 import orjson
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
+from app.core.security import verify_ws_token
 from app.core.stream_engine import stream_engine
 from app.db.models import ScanSessionModel
 from app.db.session import AsyncSessionLocal
@@ -17,11 +19,17 @@ async def session_websocket_endpoint(
     websocket: WebSocket,
     session_id: str,
     after_sequence: int = Query(0, ge=0),
+    token: Optional[str] = Query(None),
 ):
     """
     Real-time streaming WebSocket endpoint for Live Scan.
     Provides snapshot bootstrap, sequence replay, and low-latency batch broadcasts.
+    Requires valid authentication token.
     """
+    if not verify_ws_token(token):
+        await websocket.close(code=4401, reason="Unauthorized")
+        return
+
     await websocket.accept()
 
     # Bootstrap snapshot from DB
@@ -29,6 +37,12 @@ async def session_websocket_endpoint(
         async with AsyncSessionLocal() as db:
             session_resp = await session_manager.get_session_response(db, session_id)
             targets = await session_manager.list_targets(db, session_id)
+            from sqlalchemy import func
+            from app.db.models import MeasurementModel
+            max_seq_res = await db.execute(
+                select(func.max(MeasurementModel.sequence)).where(MeasurementModel.session_id == session_id)
+            )
+            max_seq = max_seq_res.scalar() or 0
 
         snapshot_event = {
             "type": "session.snapshot",
@@ -37,6 +51,7 @@ async def session_websocket_endpoint(
             "status": session_resp.status.value,
             "session": session_resp.model_dump(mode="json"),
             "targets": [t.model_dump(mode="json") for t in targets],
+            "watermark_sequence": int(max_seq),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         await websocket.send_text(orjson.dumps(snapshot_event).decode("utf-8"))

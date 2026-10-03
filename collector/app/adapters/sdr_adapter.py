@@ -84,6 +84,9 @@ class SoapySDRSignalAdapter(SignalAdapter):
 
         buffer = np.zeros(fft_size, dtype=np.complex64)
 
+        if not SOAPY_AVAILABLE or not self._device or not self._rx_stream:
+            raise RuntimeError("SoapySDR hardware device or stream is not available. Hardware mode failed.")
+
         while self._running:
             self._seq += 1
             now_dt = datetime.now(timezone.utc)
@@ -91,20 +94,17 @@ class SoapySDRSignalAdapter(SignalAdapter):
             scan_id = f"scn_sdr_{uuid.uuid4().hex[:8]}"
 
             overflow_detected = False
-            # Read IQ buffer if SDR active, otherwise calculate synthetic noise floor
-            if self._device and self._rx_stream:
-                try:
-                    sr = self._device.readStream(self._rx_stream, [buffer], fft_size)
-                    if hasattr(sr, "ret") and sr.ret < 0:
-                        overflow_detected = True
-                    windowed = buffer * np.hanning(fft_size)
-                    fft_res = np.fft.fftshift(np.fft.fft(windowed))
-                    power_dbfs = 20 * np.log10(np.abs(fft_res) / fft_size + 1e-12)
-                    bins = [round(float(b), 1) for b in power_dbfs]
-                except Exception:
-                    bins = [round(float(b), 1) for b in np.random.normal(-92.0, 1.5, fft_size)]
-            else:
-                bins = [round(float(b), 1) for b in np.random.normal(-92.0, 1.5, fft_size)]
+            try:
+                sr = self._device.readStream(self._rx_stream, [buffer], fft_size)
+                if hasattr(sr, "ret") and sr.ret < 0:
+                    overflow_detected = True
+                windowed = buffer * np.hanning(fft_size)
+                fft_res = np.fft.fftshift(np.fft.fft(windowed))
+                power_dbfs = 20 * np.log10(np.abs(fft_res) / fft_size + 1e-12)
+                bins = [round(float(b), 1) for b in power_dbfs]
+            except Exception as e:
+                logger.error(f"Error reading SoapySDR stream: {e}")
+                raise RuntimeError(f"SoapySDR stream read error: {e}")
 
             max_power = round(float(max(bins)), 1)
             clipping_detected = max_power >= -0.5

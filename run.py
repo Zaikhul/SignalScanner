@@ -131,14 +131,14 @@ def wait_for_http(url: str, timeout_sec: float = 30.0, step_sec: float = 0.5) ->
     return False
 
 
-def resolve_frontend_runner() -> Optional[List[str]]:
-    """Detects available node package manager (pnpm, npm)."""
+def resolve_frontend_runner(port: int = 3000) -> Optional[List[str]]:
+    """Detects available node package manager (pnpm, npm) and passes port."""
     pnpm_cmd = shutil.which("pnpm") or shutil.which("pnpm.cmd")
     if pnpm_cmd:
-        return [pnpm_cmd, "dev"]
+        return [pnpm_cmd, "dev", "-p", str(port)]
     npm_cmd = shutil.which("npm") or shutil.which("npm.cmd")
     if npm_cmd:
-        return [npm_cmd, "run", "dev"]
+        return [npm_cmd, "run", "dev", "--", "-p", str(port)]
     return None
 
 
@@ -217,9 +217,11 @@ def main() -> None:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["FORCE_COLOR"] = "1"
+    env["PORT"] = str(args.port_frontend)
 
     # 1. Launch Backend
     backend_url = f"http://127.0.0.1:{args.port_backend}"
+    env["NEXT_PUBLIC_API_URL"] = backend_url
     if not args.no_backend:
         log("ORCHESTRATOR", CLR_MAGENTA, f"Launching Backend on {backend_url}...")
         backend_cmd = [
@@ -297,7 +299,7 @@ def main() -> None:
     # 3. Launch Frontend
     frontend_url = f"http://localhost:{args.port_frontend}"
     if not args.no_frontend:
-        frontend_runner = resolve_frontend_runner()
+        frontend_runner = resolve_frontend_runner(args.port_frontend)
         if not frontend_runner:
             log("ORCHESTRATOR", CLR_RED, "Neither 'pnpm' nor 'npm' found in PATH. Skipping Frontend.")
         elif not os.path.exists(os.path.join(frontend_dir, "node_modules")):

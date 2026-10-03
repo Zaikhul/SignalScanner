@@ -4,12 +4,13 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.security import verify_collector_auth
 from app.db.session import get_db
 from app.schemas.measurement import MeasurementBatch
 from app.services.session_manager import session_manager
 
 logger = logging.getLogger("app.ingest")
-router = APIRouter(prefix="/collector-ingest", tags=["ingest"])
+router = APIRouter(prefix="/collector-ingest", tags=["ingest"], dependencies=[Depends(verify_collector_auth)])
 
 
 @router.post("/batches")

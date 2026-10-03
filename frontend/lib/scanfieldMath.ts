@@ -124,7 +124,12 @@ export function evaluateTargetFreshness(
     };
   }
 
-  const seenTime = new Date(timestampStr).getTime();
+  let normalizedStr = timestampStr;
+  if (typeof normalizedStr === "string" && !normalizedStr.endsWith("Z") && !/[+-]\d{2}:?\d{2}$/.test(normalizedStr)) {
+    normalizedStr = `${normalizedStr}Z`;
+  }
+
+  const seenTime = new Date(normalizedStr).getTime();
   if (isNaN(seenTime) || seenTime <= 0) {
     return {
       freshness: "unknown",

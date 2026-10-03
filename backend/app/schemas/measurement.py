@@ -1,6 +1,7 @@
+import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from .common import ScanMode
 
 FreshnessState = Literal["fresh", "stale", "expired", "unknown"]
@@ -120,6 +121,37 @@ class MeasurementBatch(BaseModel):
     sequence_to: int
     sent_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     measurements: List[NormalizedMeasurementEvent]
+
+    @model_validator(mode="after")
+    def validate_batch_envelope(self) -> "MeasurementBatch":
+        if self.sequence_from < 0:
+            raise ValueError(f"sequence_from must be >= 0, got {self.sequence_from}")
+        if self.sequence_to < self.sequence_from:
+            raise ValueError(f"sequence_to ({self.sequence_to}) cannot be less than sequence_from ({self.sequence_from})")
+
+        for m in self.measurements:
+            if m.session_id != self.session_id:
+                raise ValueError(
+                    f"Measurement session_id '{m.session_id}' does not match batch session_id '{self.session_id}'"
+                )
+            if m.collector_id != self.collector_id:
+                raise ValueError(
+                    f"Measurement collector_id '{m.collector_id}' does not match batch collector_id '{self.collector_id}'"
+                )
+            if not (self.sequence_from <= m.sequence <= self.sequence_to):
+                raise ValueError(
+                    f"Measurement sequence {m.sequence} out of batch range [{self.sequence_from}, {self.sequence_to}]"
+                )
+            if not math.isfinite(m.signal.value):
+                raise ValueError(f"Signal value must be a finite number, got {m.signal.value}")
+            if m.signal.noise is not None and not math.isfinite(m.signal.noise):
+                raise ValueError(f"Signal noise must be a finite number, got {m.signal.noise}")
+            if m.signal.snr is not None and not math.isfinite(m.signal.snr):
+                raise ValueError(f"Signal snr must be a finite number, got {m.signal.snr}")
+            if m.signal.smoothed_value is not None and not math.isfinite(m.signal.smoothed_value):
+                raise ValueError(f"Signal smoothed_value must be a finite number, got {m.signal.smoothed_value}")
+
+        return self
 
 
 class TargetSummary(BaseModel):

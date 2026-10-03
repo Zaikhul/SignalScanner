@@ -10,24 +10,45 @@ class SignalProcessor:
         # In-memory target EMA state tracker: {target_id: last_smoothed_value}
         self._target_ema_state: Dict[str, float] = {}
 
-    def calculate_ema(self, target_id: str, current_value: float, alpha: Optional[float] = None) -> float:
+    def calculate_ema(
+        self,
+        target_id: str,
+        current_value: float,
+        alpha: Optional[float] = None,
+        session_id: Optional[str] = None,
+    ) -> float:
         """
-        Calculates Exponential Moving Average for a target.
+        Calculates Exponential Moving Average for a target within a session scope.
         S_t = alpha * Y_t + (1 - alpha) * S_{t-1}
         """
         effective_alpha = alpha if alpha is not None else self.default_alpha
-        if target_id not in self._target_ema_state:
+        key = f"{session_id or 'global'}:{target_id}"
+        if key not in self._target_ema_state:
             smoothed = current_value
         else:
-            prev = self._target_ema_state[target_id]
+            prev = self._target_ema_state[key]
             smoothed = (effective_alpha * current_value) + ((1.0 - effective_alpha) * prev)
         
-        self._target_ema_state[target_id] = round(smoothed, 2)
-        return self._target_ema_state[target_id]
+        self._target_ema_state[key] = round(smoothed, 2)
+        return self._target_ema_state[key]
 
-    def reset_ema(self, target_id: Optional[str] = None) -> None:
-        if target_id:
-            self._target_ema_state.pop(target_id, None)
+    def reset_session_ema(self, session_id: str) -> None:
+        """Cleans up all EMA cache state for a completed/stopped session."""
+        prefix = f"{session_id}:"
+        keys_to_remove = [k for k in self._target_ema_state if k.startswith(prefix)]
+        for k in keys_to_remove:
+            self._target_ema_state.pop(k, None)
+
+    def reset_ema(self, target_id: Optional[str] = None, session_id: Optional[str] = None) -> None:
+        if target_id and session_id:
+            self._target_ema_state.pop(f"{session_id}:{target_id}", None)
+        elif session_id:
+            self.reset_session_ema(session_id)
+        elif target_id:
+            # Pop both global and any session keys matching target_id
+            keys_to_remove = [k for k in self._target_ema_state if k.endswith(f":{target_id}") or k == target_id]
+            for k in keys_to_remove:
+                self._target_ema_state.pop(k, None)
         else:
             self._target_ema_state.clear()
 

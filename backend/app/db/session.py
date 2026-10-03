@@ -25,9 +25,32 @@ AsyncSessionLocal = async_sessionmaker(
 
 
 async def init_db() -> None:
-    """Initializes schema and tables using metadata."""
+    """Initializes schema and tables using metadata and ensures missing columns are created."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        def sync_upgrade_columns(sync_conn):
+            from sqlalchemy import inspect, text
+            inspector = inspect(sync_conn)
+            if "measurements" in inspector.get_table_names():
+                existing_cols = {c["name"] for c in inspector.get_columns("measurements")}
+                cols_to_add = [
+                    ("scan_id", "VARCHAR(64)"),
+                    ("trace_id", "VARCHAR(64)"),
+                    ("freshness", "VARCHAR(32) DEFAULT 'fresh'"),
+                    ("source_method", "VARCHAR(64) DEFAULT 'unknown'"),
+                    ("rssi_processing", "VARCHAR(32) DEFAULT 'unknown'"),
+                    ("quality_flags", "JSON DEFAULT '{}'"),
+                    ("raw_extra", "JSON DEFAULT '{}'"),
+                ]
+                for col_name, col_type in cols_to_add:
+                    if col_name not in existing_cols:
+                        try:
+                            sync_conn.execute(text(f"ALTER TABLE measurements ADD COLUMN {col_name} {col_type}"))
+                        except Exception:
+                            pass
+
+        await conn.run_sync(sync_upgrade_columns)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

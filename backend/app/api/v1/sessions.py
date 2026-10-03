@@ -1,7 +1,7 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from app.core.security import verify_operator_auth
 from app.db.session import get_db
 from app.schemas.common import PaginatedResponse, ScanMode, SessionStatus
 from app.schemas.session import (
@@ -12,7 +12,7 @@ from app.schemas.session import (
 )
 from app.services.session_manager import session_manager
 
-router = APIRouter(prefix="/sessions", tags=["sessions"])
+router = APIRouter(prefix="/sessions", tags=["sessions"], dependencies=[Depends(verify_operator_auth)])
 
 
 @router.post("", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)

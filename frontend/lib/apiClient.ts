@@ -8,18 +8,29 @@ import {
   TargetSummary,
   WifiAssociation,
   LanHost,
+  ChannelHealthSnapshot,
+  ChannelRecommendation,
+  ChannelValidationRun,
 } from "./types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+export const API_AUTH_TOKEN = process.env.NEXT_PUBLIC_API_AUTH_TOKEN || "";
+export const LOCAL_COLLECTOR_TOKEN = process.env.NEXT_PUBLIC_LOCAL_COLLECTOR_TOKEN || "";
+export const LOCAL_COLLECTOR_URL = process.env.NEXT_PUBLIC_COLLECTOR_URL || "http://127.0.0.1:8001";
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const url = `${API_BASE}${path}`;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(options.headers as Record<string, string> || {}),
+  };
+  if (API_AUTH_TOKEN && !headers["Authorization"]) {
+    headers["Authorization"] = `Bearer ${API_AUTH_TOKEN}`;
+  }
+
   const res = await fetch(url, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
+    headers,
   });
 
   if (!res.ok) {
@@ -129,11 +140,12 @@ export const apiClient = {
   // Measurements
   async queryMeasurements(
     sessionId: string,
-    params: { target_id?: string; after_sequence?: number; limit?: number } = {}
+    params: { target_id?: string; after_sequence?: number; after_id?: string | number; limit?: number } = {}
   ): Promise<any[]> {
     const query = new URLSearchParams();
     if (params.target_id) query.set("target_id", params.target_id);
     if (params.after_sequence !== undefined) query.set("after_sequence", params.after_sequence.toString());
+    if (params.after_id !== undefined) query.set("after_id", params.after_id.toString());
     if (params.limit) query.set("limit", params.limit.toString());
 
     return request<any[]>(`/api/v1/sessions/${sessionId}/measurements?${query.toString()}`);
@@ -188,26 +200,44 @@ export const apiClient = {
     timeout_seconds: number;
   }): Promise<any> {
     // Sends credentials directly to local collector agent (port 8001) in-memory
-    const localUrl = "http://127.0.0.1:8001/api/v1/collector/associate";
-    try {
-      const res = await fetch(localUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      return await res.json();
-    } catch (e) {
-      console.warn("Direct local collector call failed, falling back to backend queue:", e);
-      return null;
+    const localUrl = `${LOCAL_COLLECTOR_URL}/api/v1/collector/associate`;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (LOCAL_COLLECTOR_TOKEN) {
+      headers["X-Local-Token"] = LOCAL_COLLECTOR_TOKEN;
+      headers["Authorization"] = `Bearer ${LOCAL_COLLECTOR_TOKEN}`;
     }
+
+    const res = await fetch(localUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      let errorDetail = res.statusText;
+      try {
+        const errJson = await res.json();
+        errorDetail = errJson.detail || errorDetail;
+      } catch {
+        // Ignore JSON parse error
+      }
+      throw new Error(`Direct Associate Error [${res.status}]: ${errorDetail}`);
+    }
+
+    return await res.json();
   },
 
   async disconnectAssociation(associationId: string, forgetProfile: boolean = true): Promise<WifiAssociation> {
     // Also signal local collector agent directly if available
     try {
-      await fetch("http://127.0.0.1:8001/api/v1/collector/disconnect", {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (LOCAL_COLLECTOR_TOKEN) {
+        headers["X-Local-Token"] = LOCAL_COLLECTOR_TOKEN;
+        headers["Authorization"] = `Bearer ${LOCAL_COLLECTOR_TOKEN}`;
+      }
+      await fetch(`${LOCAL_COLLECTOR_URL}/api/v1/collector/disconnect`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ forget_profile: forgetProfile }),
       });
     } catch {
@@ -249,6 +279,42 @@ export const apiClient = {
   }> {
     return request<any>(`/api/v1/associations/${associationId}/exports?format=${format}`, {
       method: "POST",
+    });
+  },
+
+  // Channel Health (v1.2)
+  async getChannelHealth(sessionId: string, band: string = "2.4GHz"): Promise<ChannelHealthSnapshot> {
+    return request<ChannelHealthSnapshot>(`/api/v1/sessions/${sessionId}/channel-health?band=${encodeURIComponent(band)}`);
+  },
+
+  async getLatestRecommendation(sessionId: string): Promise<ChannelRecommendation> {
+    return request<ChannelRecommendation>(`/api/v1/sessions/${sessionId}/channel-recommendations/latest`);
+  },
+
+  async listChannelValidations(sessionId: string): Promise<ChannelValidationRun[]> {
+    return request<ChannelValidationRun[]>(`/api/v1/sessions/${sessionId}/channel-validations`);
+  },
+
+  async evaluateChannelRecommendation(sessionId: string, payload: {
+    band: string;
+    channel_width_mhz?: number;
+    observation_window_sec?: number;
+    regulatory_domain?: string;
+  }): Promise<ChannelRecommendation> {
+    return request<ChannelRecommendation>(`/api/v1/sessions/${sessionId}/channel-recommendations/evaluate`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async triggerChannelValidation(sessionId: string, payload: {
+    marker_id?: string | null;
+    before_window_sec?: number;
+    after_window_sec?: number;
+  }): Promise<ChannelValidationRun> {
+    return request<ChannelValidationRun>(`/api/v1/sessions/${sessionId}/channel-validations`, {
+      method: "POST",
+      body: JSON.stringify(payload),
     });
   },
 };

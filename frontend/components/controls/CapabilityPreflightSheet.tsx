@@ -33,7 +33,7 @@ export function CapabilityPreflightSheet({
   const [result, setResult] = useState<PreflightDiagnosticResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const runPreflight = async () => {
+  const runPreflight = React.useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -50,13 +50,13 @@ export function CapabilityPreflightSheet({
     } finally {
       setLoading(false);
     }
-  };
+  }, [collectorId, mode]);
 
   React.useEffect(() => {
     if (isOpen && collectorId) {
       runPreflight();
     }
-  }, [isOpen, collectorId, mode]);
+  }, [isOpen, collectorId, runPreflight]);
 
   if (!isOpen) return null;
 

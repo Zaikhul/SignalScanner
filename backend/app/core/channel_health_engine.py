@@ -179,9 +179,12 @@ class ChannelHealthEngine:
             quality_flags.append("CHANNEL_WIDTH_UNKNOWN")
 
         # Temporal instability analysis per channel from measurements
-        # Calculate standard deviation of RSSI per channel over the window
+        # Calculate standard deviation of RSSI per channel over the window, strictly matching target band
         ch_measurements: Dict[int, List[float]] = {}
         for m in measurements:
+            m_band = m.get("band")
+            if m_band and m_band != band:
+                continue
             ch = m.get("channel")
             if ch is not None:
                 ch_measurements.setdefault(ch, []).append(float(m.get("signal_value", -90.0)))

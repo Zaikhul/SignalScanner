@@ -15,11 +15,12 @@ from app.db.models import (
     ScanSessionModel,
     SessionManifestModel,
 )
+from app.core.security import verify_operator_auth
 from app.db.session import get_db
 from app.schemas.manifest import SessionProvenanceManifest
 from app.services.session_manager import session_manager
 
-router = APIRouter(prefix="/sessions", tags=["provenance-manifests"])
+router = APIRouter(prefix="/sessions", tags=["provenance-manifests"], dependencies=[Depends(verify_operator_auth)])
 
 
 @router.get("/{session_id}/manifest", response_model=SessionProvenanceManifest)

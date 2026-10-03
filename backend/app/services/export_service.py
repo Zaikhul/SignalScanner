@@ -78,6 +78,12 @@ class ExportService:
         measurements: list,
         req: ExportRequest,
     ) -> str:
+        mask_ssid = False
+        if session.config and isinstance(session.config, dict):
+            priv = session.config.get("privacy_config", {})
+            if isinstance(priv, dict):
+                mask_ssid = priv.get("mask_ssid", False)
+
         export_dict: Dict[str, Any] = {
             "schema_version": "1.0",
             "exported_at": datetime.now(timezone.utc).isoformat(),
@@ -105,13 +111,24 @@ class ExportService:
             "targets": [
                 {
                     "target_id": t.target_id,
-                    "display_name": t.display_name,
+                    "display_name": (
+                        (f"***{t.display_name[-3:]}" if len(t.display_name) > 3 else "***")
+                        if (mask_ssid and t.display_name)
+                        else t.display_name
+                    ),
                     "mode": t.mode,
                     "channel": t.channel,
                     "band": t.band,
                     "first_seen": t.first_seen.isoformat(),
                     "last_seen": t.last_seen.isoformat(),
-                    "metadata": t.metadata_json,
+                    "metadata": {
+                        k: (
+                            (f"***{v[-3:]}" if len(str(v)) > 3 else "***")
+                            if (mask_ssid and k in ("ssid", "display_name", "raw_ssid") and v)
+                            else v
+                        )
+                        for k, v in (t.metadata_json or {}).items()
+                    },
                 }
                 for t in targets
             ],
