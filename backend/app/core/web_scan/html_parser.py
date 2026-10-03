@@ -95,13 +95,20 @@ class WebPageHtmlParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() == "form" and self._inside_form:
             self._inside_form = False
-            self.forms.append(
-                DiscoveredForm(
-                    action=self._current_form_action or self.base_url,
-                    method=self._current_form_method,
-                    fields=self._current_form_fields,
+            action_url = self._current_form_action or self.base_url
+            parts = urlsplit(action_url)
+            # Only retain form if action belongs to same host or subdomain
+            if not parts.hostname or (
+                parts.hostname == self.base_domain
+                or parts.hostname.endswith("." + self.base_domain)
+            ):
+                self.forms.append(
+                    DiscoveredForm(
+                        action=action_url,
+                        method=self._current_form_method,
+                        fields=self._current_form_fields,
+                    )
                 )
-            )
             self._current_form_action = None
             self._current_form_fields = []
 

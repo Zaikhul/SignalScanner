@@ -64,3 +64,34 @@ async def test_http_client_cancel_event():
         assert resp is None
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pinned_dns_network_backend_and_transport():
+    from httpcore._backends.auto import AutoBackend
+    from app.core.web_scan.transport import PinnedDNSNetworkBackend, PolicyCheckingTransport
+
+    backend = PinnedDNSNetworkBackend(allow_private=True, allow_loopback=True)
+    assert isinstance(backend, AutoBackend)
+    assert backend.allow_private is True
+    assert backend.allow_loopback is True
+
+    transport = PolicyCheckingTransport(allow_private=True, allow_loopback=True)
+    assert transport.allow_private is True
+    assert transport.allow_loopback is True
+    assert isinstance(transport.pinned_backend, AutoBackend)
+    await transport.aclose()
+
+
+@pytest.mark.asyncio
+async def test_policy_checking_transport_loopback_restriction():
+    from app.core.web_scan.transport import PolicyCheckingTransport
+
+    transport = PolicyCheckingTransport(allow_private=False, allow_loopback=False)
+    req = httpx.Request("GET", "http://127.0.0.1:8080/test")
+    # Must reject with ValueError (Loopback restricted), NEVER NotImplementedError!
+    with pytest.raises(ValueError) as exc_info:
+        await transport.handle_async_request(req)
+    assert "Loopback addresses are restricted" in str(exc_info.value)
+    await transport.aclose()
+

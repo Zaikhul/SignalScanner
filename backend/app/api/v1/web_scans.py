@@ -142,9 +142,7 @@ async def cancel_web_scan(
     db: AsyncSession = Depends(get_db),
 ):
     _check_enabled()
-    # Trigger cancellation in memory if actively executing
-    web_scan_scheduler.request_cancel(scan_id)
-
+    # 1. Verify existence, tenant ownership, and permission first
     job = await WebScanService.cancel_scan_job(
         db=db,
         tenant_id=principal.tenant_id,
@@ -156,6 +154,9 @@ async def cancel_web_scan(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Scan job {scan_id} not found",
         )
+
+    # 2. Trigger cancellation in memory only after ownership verification succeeded
+    web_scan_scheduler.request_cancel(scan_id)
     return job
 
 

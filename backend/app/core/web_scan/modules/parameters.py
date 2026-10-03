@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
-from app.core.web_scan.html_parser import DiscoveredForm
+from app.core.web_scan.html_parser import DiscoveredForm, FormField
 from app.core.web_scan.http_client import WebScanHttpClient, WebScanResponse
 from app.core.web_scan.payload_catalog import (
     DATABASE_ERROR_SIGNATURES,
@@ -27,14 +27,36 @@ class ParametersModule:
     ):
         self.http = http_client
         self.target_url = target_url
-        self.forms = discovered_forms
         self.seed = seed
         parts = urlsplit(target_url)
         self.domain = parts.hostname or ""
 
+        # Aggregate discovered forms and query parameters from target URL (F-23)
+        self.forms: List[DiscoveredForm] = list(discovered_forms)
+
+        # Extract target URL query parameters
+        if parts.query:
+            query_pairs = parse_qsl(parts.query, keep_blank_values=True)
+            if query_pairs:
+                base_action = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+                query_fields = [
+                    FormField(name=k, input_type="query")
+                    for k, _ in query_pairs
+                    if k
+                ]
+                if query_fields:
+                    self.forms.append(
+                        DiscoveredForm(
+                            action=base_action,
+                            method="GET",
+                            fields=query_fields,
+                        )
+                    )
+
     async def run(self) -> Dict[str, Any]:
         findings = []
         observations = []
+        tested_params_count = 0
 
         # 1. Obtain baseline request
         base_resp = await self.http.fetch(self.target_url)
@@ -46,6 +68,8 @@ class ParametersModule:
                 param_name = field.name
                 if not param_name or field.input_type == "password":
                     continue
+
+                tested_params_count += 1
 
                 for raw_payload in SQL_DIAGNOSTIC_PAYLOADS:
                     payload = get_random_mutated_payload(raw_payload, seed=self.seed)
@@ -66,6 +90,7 @@ class ParametersModule:
                     if matched_error:
                         cat = "SQLI" if "sql" in matched_error or "mysql" in matched_error or "ora" in matched_error else "NOSQL_INJECT"
                         findings.append({
+                            "module": "parameters",
                             "check_id": "parameters.sql_error_matching",
                             "category": "injection_vulnerability",
                             "source_category": cat,
@@ -89,6 +114,7 @@ class ParametersModule:
                     # ── Check 2: XSS Reflection (C-20) ──────────────────────
                     if "ghost_reflection_marker_2026" in t_resp.text:
                         findings.append({
+                            "module": "parameters",
                             "check_id": "parameters.xss_reflection",
                             "category": "xss_reflection",
                             "source_category": "XSS",
@@ -112,6 +138,7 @@ class ParametersModule:
                     # ── Check 3: Time-based delay detection (C-23) ──────────
                     if t_resp.elapsed_ms > (base_elapsed + 4000.0) and any(kw in raw_payload.lower() for kw in ("sleep", "waitfor")):
                         findings.append({
+                            "module": "parameters",
                             "check_id": "parameters.time_based_delay",
                             "category": "injection_vulnerability",
                             "source_category": "SQL_TIME_BASED",
@@ -153,8 +180,11 @@ class ParametersModule:
                                 },
                             })
 
+        status_str = "completed" if tested_params_count > 0 else "skipped"
+        reason_str = None if tested_params_count > 0 else "NO_PARAMETERS_FOUND"
         return {
             "findings": findings,
             "observations": observations,
-            "status": "completed",
+            "status": status_str,
+            "reason": reason_str,
         }

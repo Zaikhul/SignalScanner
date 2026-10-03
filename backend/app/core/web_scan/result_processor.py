@@ -62,6 +62,31 @@ def compute_fingerprint(check_id: str, title: str, domain: str, extra: str = "")
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
+def _resolve_finding_module(item: Dict[str, Any]) -> ModuleId:
+    """Accurately identifies finding module provenance based on item field or check_id prefix (F-14)."""
+    raw_mod = item.get("module")
+    if raw_mod:
+        try:
+            return ModuleId(raw_mod)
+        except ValueError:
+            pass
+
+    check_id = item.get("check_id", "")
+    prefix = check_id.split(".")[0].lower() if "." in check_id else ""
+    prefix_map = {
+        "headers": ModuleId.HEADERS,
+        "cookies": ModuleId.COOKIES,
+        "forms": ModuleId.FORMS,
+        "parameters": ModuleId.PARAMETERS,
+        "header_probes": ModuleId.HEADER_PROBES,
+        "stress": ModuleId.STRESS,
+        "recon": ModuleId.RECON,
+    }
+    if prefix in prefix_map:
+        return prefix_map[prefix]
+    return ModuleId.RECON
+
+
 def deduplicate_findings(raw_findings: List[Dict[str, Any]], scan_id: str) -> List[ScanFinding]:
     """Deduplicates raw findings by fingerprint and aggregates occurrence counts."""
     deduped: Dict[str, ScanFinding] = {}
@@ -87,10 +112,12 @@ def deduplicate_findings(raw_findings: List[Dict[str, Any]], scan_id: str) -> Li
                 baseline_elapsed_ms=evidence_data.get("baseline_elapsed_ms"),
             )
 
+            mod_id = _resolve_finding_module(item)
+
             finding = ScanFinding(
                 id=hashlib.md5(f"{scan_id}:{fp}".encode("utf-8")).hexdigest(),
                 scan_id=scan_id,
-                module=ModuleId(item.get("module", "recon")),
+                module=mod_id,
                 check_id=item["check_id"],
                 category=item.get("category", "general"),
                 source_category=item.get("source_category"),
@@ -112,12 +139,23 @@ def deduplicate_findings(raw_findings: List[Dict[str, Any]], scan_id: str) -> Li
     return list(deduped.values())
 
 
+def score_to_risk_band(score: float) -> str:
+    """Consistent, authoritative mapping from numerical risk score to risk band (F-21)."""
+    if score >= 70:
+        return "critical"
+    elif score >= 50:
+        return "high"
+    elif score >= 30:
+        return "medium"
+    return "low"
+
+
 def calculate_risk_indices(findings: List[ScanFinding]) -> LegacyIndices:
-    """Calculates V47, V75, and V2 risk scores using exact formulas from source code."""
+    """Calculates V47, V75, and V2 risk scores using exact formulas and consistent risk bands (F-21)."""
     # V47 formula: min(count * 20, 100)
     v47_count = len([f for f in findings if f.severity in (Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM)])
     v47_score = min(v47_count * 20, 100)
-    v47_band = "high" if v47_score > 50 else "medium"
+    v47_band = score_to_risk_band(v47_score)
 
     # V75 formula: sum of exact weights, capped at 100
     v75_points = 0
@@ -125,7 +163,7 @@ def calculate_risk_indices(findings: List[ScanFinding]) -> LegacyIndices:
         cat = (f.source_category or f.category or "").upper()
         v75_points += _V75_WEIGHTS.get(cat, 15)
     v75_score = min(v75_points, 100)
-    v75_band = "critical" if v75_score > 70 else ("medium" if v75_score > 30 else "low")
+    v75_band = score_to_risk_band(v75_score)
 
     # V2 formula: from local json_report.py ScanReport.calculate_risk()
     v2_points = 0
@@ -133,6 +171,7 @@ def calculate_risk_indices(findings: List[ScanFinding]) -> LegacyIndices:
         cat = (f.source_category or f.category or "").upper()
         v2_points += _V2_WEIGHTS.get(cat, 10)
     v2_score = min(v2_points, 100)
+    v2_band = score_to_risk_band(v2_score)
 
     return LegacyIndices(
         v47={
@@ -148,7 +187,7 @@ def calculate_risk_indices(findings: List[ScanFinding]) -> LegacyIndices:
         v2={
             "value": v2_score,
             "formula_version": "v2_json_report_weights",
-            "source_band": "high" if v2_score > 50 else "medium",
+            "source_band": v2_band,
         },
     )
 
@@ -159,29 +198,33 @@ def build_scan_result(
     errors_count: int = 0,
     load_metrics_data: Optional[Dict[str, Any]] = None,
     coverage: Optional[List[CoverageEntry]] = None,
+    request_metrics: Optional[RequestMetrics] = None,
 ) -> ScanResult:
-    """Aggregates findings, observations, and metrics into a standardized ScanResult."""
+    """Aggregates findings, observations, and authoritative request ledger metrics into a standardized ScanResult (F-16)."""
     counts: Dict[str, int] = {s.value: 0 for s in Severity}
     for f in findings:
         counts[f.severity.value] = counts.get(f.severity.value, 0) + 1
 
     legacy_indices = calculate_risk_indices(findings)
 
-    # Compile request counters from HTTP response observations
-    req_metrics = RequestMetrics()
-    for obs in observations:
-        if obs.get("kind") == "http_response":
-            req_metrics.attempted += 1
-            req_metrics.completed += 1
-            sc = obs.get("data", {}).get("status_code", 200)
-            if 200 <= sc < 400:
-                req_metrics.http_2xx_3xx += 1
-            elif 400 <= sc < 500:
-                req_metrics.http_4xx += 1
-            elif 500 <= sc < 600:
-                req_metrics.http_5xx += 1
-            else:
-                req_metrics.http_other += 1
+    # Use authoritative request ledger metrics if provided, else compile from observations (F-16)
+    if request_metrics:
+        req_metrics = request_metrics
+    else:
+        req_metrics = RequestMetrics()
+        for obs in observations:
+            if obs.get("kind") == "http_response":
+                req_metrics.attempted += 1
+                req_metrics.completed += 1
+                sc = obs.get("data", {}).get("status_code", 200)
+                if 200 <= sc < 400:
+                    req_metrics.http_2xx_3xx += 1
+                elif 400 <= sc < 500:
+                    req_metrics.http_4xx += 1
+                elif 500 <= sc < 600:
+                    req_metrics.http_5xx += 1
+                else:
+                    req_metrics.http_other += 1
 
     load_metrics = None
     if load_metrics_data:

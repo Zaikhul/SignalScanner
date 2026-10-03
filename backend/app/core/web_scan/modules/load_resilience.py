@@ -73,8 +73,10 @@ class LoadResilienceModule:
                     sc = resp.status_code
                     if 200 <= sc < 400:
                         http_2xx_3xx += 1
+                        legacy_success_lt_500 += 1
                     elif 400 <= sc < 500:
                         http_4xx += 1
+                        legacy_success_lt_500 += 1
                         if sc == 429:
                             rate_limited += 1
                     elif 500 <= sc < 600:
@@ -82,10 +84,6 @@ class LoadResilienceModule:
                         legacy_failure += 1
                     else:
                         http_other += 1
-
-                    if sc < 500:
-                        legacy_success_lt_500 += 1
-                    else:
                         legacy_failure += 1
 
                 if delay_sec > 0:
@@ -126,6 +124,7 @@ class LoadResilienceModule:
 
         if legacy_fail_pct > 50.0:
             findings.append({
+                "module": "stress",
                 "check_id": "stress.bounded_load_test",
                 "category": "service_resilience",
                 "source_category": "STRESS_TEST",
@@ -146,6 +145,7 @@ class LoadResilienceModule:
             })
         elif legacy_fail_pct > 20.0:
             findings.append({
+                "module": "stress",
                 "check_id": "stress.bounded_load_test",
                 "category": "service_resilience",
                 "source_category": "STRESS_TEST",

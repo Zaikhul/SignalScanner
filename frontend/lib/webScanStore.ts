@@ -90,7 +90,7 @@ export const useWebScanStore = create<WebScanStore>((set) => ({
 
   addEvent: (event) =>
     set((state) => ({
-      events: [...state.events, event],
+      events: [...state.events, event].slice(-500),
     })),
 
   setProgress: (percent, moduleName) =>

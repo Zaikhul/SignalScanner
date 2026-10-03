@@ -31,6 +31,7 @@ export function WebScanControls() {
       profile,
       timeout_seconds: timeoutSec,
       allow_private: allowPrivate,
+      allow_loopback: allowPrivate,
       max_concurrency: maxConcurrency,
       requests_per_second: rps,
     };

@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 import uuid
 
 import httpx
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import desc, func, select, update
 
 from app.config import settings
@@ -64,6 +65,11 @@ class WebScanScheduler:
         for scan_id, event in list(self._cancel_events.items()):
             event.set()
 
+        # Cancel all active tasks immediately
+        for scan_id, task in list(self._active_tasks.items()):
+            if not task.done():
+                task.cancel()
+
         # Wait for active tasks with timeout
         active_list = list(self._active_tasks.values())
         if active_list:
@@ -120,10 +126,17 @@ class WebScanScheduler:
                 # Poll pending job
                 job_id = await self._claim_next_job()
                 if job_id:
+                    # Register cancel event immediately upon queuing (F-07)
+                    cancel_event = asyncio.Event()
+                    self._cancel_events[job_id] = cancel_event
+
                     # Spawn task bounded by global semaphore
-                    task = asyncio.create_task(self._execute_job_wrapper(job_id))
+                    task = asyncio.create_task(self._execute_job_wrapper(job_id, cancel_event))
                     self._active_tasks[job_id] = task
-                    task.add_done_callback(lambda t, jid=job_id: self._active_tasks.pop(jid, None))
+                    task.add_done_callback(lambda t, jid=job_id: (
+                        self._active_tasks.pop(jid, None),
+                        self._cancel_events.pop(jid, None),
+                    ))
                 else:
                     # Wait for trigger or timeout (default poll interval 2s)
                     try:
@@ -172,26 +185,44 @@ class WebScanScheduler:
                 return job.id
             return None
 
-    async def _execute_job_wrapper(self, job_id: str) -> None:
+    async def _execute_job_wrapper(self, job_id: str, cancel_event: asyncio.Event) -> None:
         """Executes a single job within semaphore and manages persistence of results."""
         if not self._global_semaphore:
-            self._global_semaphore = asyncio.Semaphore(10)
+            self._global_semaphore = asyncio.Semaphore(
+                getattr(settings, "WEB_SCAN_GLOBAL_MAX_CONCURRENCY", 10000)
+            )
 
         async with self._global_semaphore:
-            cancel_event = asyncio.Event()
-            self._cancel_events[job_id] = cancel_event
+            if cancel_event.is_set():
+                logger.info("Job %s was cancelled before acquiring semaphore slot; aborting", job_id)
+                return
 
             try:
-                # Load job details
+                # Load job details and enforce CAS transition from QUEUED -> SCANNING (F-07)
                 async with AsyncSessionLocal() as db:
                     job = await db.get(WebScanJobModel, job_id)
-                    if not job:
+                    if not job or job.status == ScanState.CANCELLED.value or cancel_event.is_set():
+                        logger.info("Job %s is cancelled or absent; aborting execution", job_id)
                         return
 
                     now = datetime.now(timezone.utc)
-                    job.status = ScanState.SCANNING.value
-                    job.started_at = now
-                    job.version += 1
+                    update_stmt = (
+                        update(WebScanJobModel)
+                        .where(
+                            WebScanJobModel.id == job_id,
+                            WebScanJobModel.status == ScanState.QUEUED.value,
+                        )
+                        .values(
+                            status=ScanState.SCANNING.value,
+                            started_at=now,
+                            version=job.version + 1,
+                        )
+                    )
+                    res_update = await db.execute(update_stmt)
+                    if res_update.rowcount == 0:
+                        await db.rollback()
+                        logger.info("Job %s status is not QUEUED; CAS aborted", job_id)
+                        return
                     await db.commit()
 
                     config = ScanConfiguration(**(job.effective_configuration or {}))
@@ -206,8 +237,10 @@ class WebScanScheduler:
                                 scan_id=event.scan_id,
                                 sequence=event.sequence,
                                 type=event.type,
-                                payload=event.payload if isinstance(event.payload, dict) else (
-                                    event.payload.model_dump() if hasattr(event.payload, "model_dump") else {}
+                                payload=jsonable_encoder(
+                                    event.payload.model_dump(mode="json")
+                                    if hasattr(event.payload, "model_dump")
+                                    else event.payload
                                 ),
                                 occurred_at=event.occurred_at,
                             )
@@ -225,22 +258,31 @@ class WebScanScheduler:
                     transport=self._mock_transport,
                     event_sink=event_sink,
                     initial_sequence=current_seq,
+                    global_semaphore=self._global_semaphore,
                 )
 
                 final_state, scan_result, findings, observations, errors, status_reason = (
                     await engine.run()
                 )
 
+                summary_dict = scan_result.model_dump(mode="json")
+                summary_dict["errors"] = [e.model_dump(mode="json") for e in errors]
+                summary_dict = jsonable_encoder(summary_dict)
+
                 # Persist outcomes in database
                 async with AsyncSessionLocal() as db:
                     now = datetime.now(timezone.utc)
                     job_record = await db.get(WebScanJobModel, job_id)
                     if job_record:
+                        if job_record.status == ScanState.CANCELLED.value and final_state != ScanState.CANCELLED:
+                            logger.info("Job %s cancelled while executing; preserving CANCELLED state", job_id)
+                            final_state = ScanState.CANCELLED
+
                         job_record.status = final_state.value
                         job_record.status_reason = status_reason
                         job_record.ended_at = now
                         job_record.version += 1
-                        job_record.summary_data = scan_result.model_dump()
+                        job_record.summary_data = summary_dict
 
                         # Save findings
                         for f in findings:
@@ -258,7 +300,11 @@ class WebScanScheduler:
                                 title=f.title,
                                 description=f.description,
                                 remediation=f.remediation,
-                                evidence=f.evidence.model_dump(),
+                                evidence=jsonable_encoder(
+                                    f.evidence.model_dump(mode="json")
+                                    if hasattr(f.evidence, "model_dump")
+                                    else f.evidence
+                                ),
                                 fingerprint=f.fingerprint,
                                 occurrence_count=f.occurrence_count,
                                 assessment_version=f.assessment_version,
@@ -275,12 +321,29 @@ class WebScanScheduler:
                                 module=obs.get("module", "recon"),
                                 kind=obs.get("kind", "http_response"),
                                 request_id=obs.get("request_id"),
-                                data=obs.get("data", {}),
+                                data=jsonable_encoder(obs.get("data", {})),
                                 observed_at=now,
                             )
                             db.add(obs_model)
 
                         await db.commit()
+
+                # Stream finding_upserted events so dashboard findings table populates in real time (F-12)
+                for f in findings:
+                    engine.sequence += 1
+                    await event_sink(
+                        WebScanEvent(
+                            scan_id=job_id,
+                            sequence=engine.sequence,
+                            occurred_at=datetime.now(timezone.utc),
+                            type="finding_upserted",
+                            payload=jsonable_encoder(
+                                f.model_dump(mode="json")
+                                if hasattr(f, "model_dump")
+                                else f
+                            ),
+                        )
+                    )
 
                 # Emit final state_changed and completed events now that DB is fully committed
                 next_seq = engine.sequence + 1
@@ -299,9 +362,16 @@ class WebScanScheduler:
                         sequence=next_seq + 1,
                         occurred_at=datetime.now(timezone.utc),
                         type="completed",
-                        payload=scan_result.model_dump(),
+                        payload=summary_dict,
                     )
                 )
+
+                # Update job's snapshot_sequence
+                async with AsyncSessionLocal() as db:
+                    job_record = await db.get(WebScanJobModel, job_id)
+                    if job_record:
+                        job_record.snapshot_sequence = next_seq + 1
+                        await db.commit()
 
             except Exception as exc:
                 logger.exception("Error executing scan job %s: %s", job_id, exc)

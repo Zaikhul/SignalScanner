@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import posixpath
 import re
 import socket
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -109,17 +110,24 @@ def parse_and_validate_target(raw_target: str) -> NormalizedTarget:
     elif port < 1 or port > 65535:
         raise ValueError(f"Port {port} is out of valid range (1-65535)")
 
-    # Normalize path
-    path = parts.path or "/"
-    if not path.startswith("/"):
-        path = "/" + path
+    # Normalize path resolving dot-segments (e.g. /approved/../outside -> /outside)
+    raw_path = parts.path or "/"
+    import posixpath
+    normalized_path = posixpath.normpath(raw_path)
+    if not normalized_path.startswith("/"):
+        normalized_path = "/" + normalized_path
+    if raw_path.endswith("/") and not normalized_path.endswith("/"):
+        normalized_path += "/"
+    path = normalized_path
 
     query = parts.query or ""
 
     # Build canonical URL (re-assemble without fragment, standard ports omitted)
-    netloc_str = hostname
+    # Host for netloc: IPv6 addresses must be enclosed in brackets
+    formatted_host = f"[{hostname}]" if ":" in hostname else hostname
+    netloc_str = formatted_host
     if (scheme == "http" and port != 80) or (scheme == "https" and port != 443):
-        netloc_str = f"{hostname}:{port}"
+        netloc_str = f"{formatted_host}:{port}"
 
     canonical_url = urlunsplit((scheme, netloc_str, path, query, ""))
     display_url = sanitize_target_for_display(canonical_url)
@@ -137,7 +145,7 @@ def parse_and_validate_target(raw_target: str) -> NormalizedTarget:
 
 
 def sanitize_target_for_display(url: str) -> str:
-    """Redacts query parameter values in URL to prevent leaking tokens/secrets in logs/UI."""
+    """Redacts query parameter values in URL to prevent leaking tokens/secrets in logs/UI/evidence/exports."""
     try:
         parts = urlsplit(url)
         if not parts.query:
@@ -148,6 +156,11 @@ def sanitize_target_for_display(url: str) -> str:
         return urlunsplit((parts.scheme, parts.netloc, parts.path, redacted_query, ""))
     except Exception:
         return url
+
+
+def redact_url_query_params(url: str) -> str:
+    """Authoritative helper for redacting query strings across evidence, telemetry, logs, and exports."""
+    return sanitize_target_for_display(url)
 
 
 def is_ip_allowed(
@@ -258,8 +271,9 @@ def validate_and_normalize_target(
 def validate_target_against_scope(
     target_url: str,
     rules: List[Dict[str, Any]],
+    method: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
-    """Checks whether the target URL conforms to scope grant rules."""
+    """Checks whether the target URL conforms to scope grant rules, methods, and CIDRs."""
     try:
         norm = parse_and_validate_target(target_url)
     except Exception as exc:
@@ -282,12 +296,37 @@ def validate_target_against_scope(
         if ports and norm.port not in ports:
             continue
 
-        # Check path prefixes
+        # Check path prefixes with normalized path
         prefixes = rule.get("path_prefixes", ["/"])
-        if prefixes and not any(norm.path.startswith(p) for p in prefixes):
+        norm_prefixes = []
+        for p in prefixes:
+            if not p or p == "/":
+                norm_prefixes.append("/")
+            else:
+                n = posixpath.normpath(p)
+                norm_prefixes.append(n.rstrip("/") + "/" if p.endswith("/") else n)
+        if norm_prefixes and not any(norm.path.startswith(p) for p in norm_prefixes):
             continue
+
+        # Check methods if specified
+        if method:
+            allowed_methods = rule.get("methods", ["GET", "POST"])
+            if method.upper() not in [m.upper() for m in allowed_methods]:
+                continue
+
+        # Check allowed CIDRs if specified
+        allowed_cidrs = rule.get("allowed_cidrs", [])
+        if allowed_cidrs:
+            try:
+                ip_obj = ipaddress.ip_address(norm.hostname)
+                in_cidr = any(ip_obj in ipaddress.ip_network(c) for c in allowed_cidrs)
+                if not in_cidr:
+                    continue
+            except ValueError:
+                # Hostname is a domain name, not IP literal
+                pass
 
         return True, None
 
-    return False, "Target does not match any authorized host, port, or path rule"
+    return False, "Target does not match any authorized host, port, path, or method rule"
 

@@ -13,6 +13,14 @@ def override_auth_for_legacy_tests():
 
 
 @pytest.fixture(autouse=True)
+async def ensure_db_init():
+    """Initializes tables for test database."""
+    from app.db.session import init_db
+    await init_db()
+    yield
+
+
+@pytest.fixture(autouse=True)
 async def dispose_db_engine():
     """Disposes engine connection pool between async tests to prevent asyncpg loop conflicts."""
     yield

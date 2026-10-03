@@ -50,6 +50,7 @@ class WebScanEngine:
         transport: Optional[httpx.AsyncBaseTransport] = None,
         event_sink: Optional[Callable[[WebScanEvent], Awaitable[None]]] = None,
         initial_sequence: int = 1,
+        global_semaphore: Optional[asyncio.Semaphore] = None,
     ):
         self.scan_id = scan_id
         self.target_url = target_url
@@ -58,6 +59,7 @@ class WebScanEngine:
         self.transport = transport
         self.event_sink = event_sink
         self.sequence = initial_sequence
+        self.global_semaphore = global_semaphore
 
     async def _emit_event(self, event_type: str, payload: Any) -> None:
         """Helper to emit sequential scan events."""
@@ -124,6 +126,7 @@ class WebScanEngine:
             config=self.config,
             transport=self.transport,
             cancel_event=self.cancel_event,
+            global_semaphore=self.global_semaphore,
         )
 
         try:
@@ -162,24 +165,32 @@ class WebScanEngine:
                         mod_obs = res.get("observations", [])
                         all_raw_findings.extend(mod_findings)
                         all_observations.extend(mod_obs)
+                        root_response = res.get("root_response")
 
-                        # Capture root response for downstream modules
-                        for obs in mod_obs:
-                            if obs.get("kind") == "http_response":
-                                resp_data = obs.get("data", {})
-                                headers_dict = {
-                                    k: resp_data.get("server", "")
-                                    for k in ["server"]
-                                    if resp_data.get("server")
-                                }
-                                # Fetch clean root response for header/cookie inspection
-                                root_response = await http_client.fetch(self.target_url)
-                                break
+                        # Capture root response for downstream modules if not already captured
+                        if not root_response:
+                            for obs in mod_obs:
+                                if obs.get("kind") == "http_response":
+                                    root_response = await http_client.fetch(self.target_url)
+                                    break
 
-                        # Mark recon checks completed
-                        for cid, entry in coverage_map.items():
-                            if entry.module == ModuleId.RECON:
-                                entry.status = CheckStatus.COMPLETED
+                        # Mark recon checks accurately (F-08, F-15)
+                        if not root_response and res.get("status") == "failed":
+                            for cid, entry in coverage_map.items():
+                                if entry.module == ModuleId.RECON:
+                                    entry.status = CheckStatus.INCONCLUSIVE
+                                    entry.reason_code = "ROOT_TARGET_UNREACHABLE"
+                        else:
+                            for cid, entry in coverage_map.items():
+                                if entry.module == ModuleId.RECON:
+                                    if cid == "recon.geolocation":
+                                        entry.status = CheckStatus.SKIPPED
+                                        entry.reason_code = "OPTIONAL_FEATURE_DISABLED"
+                                    elif cid == "recon.subdomain_enumeration":
+                                        entry.status = CheckStatus.SKIPPED
+                                        entry.reason_code = "SUBDOMAIN_ENUM_DISABLED"
+                                    else:
+                                        entry.status = CheckStatus.COMPLETED
 
                     elif mod == ModuleId.HEADERS:
                         if not root_response:
@@ -258,9 +269,15 @@ class WebScanEngine:
                         all_raw_findings.extend(mod_findings)
                         all_observations.extend(res.get("observations", []))
 
-                        for cid, entry in coverage_map.items():
-                            if entry.module == ModuleId.PARAMETERS:
-                                entry.status = CheckStatus.COMPLETED
+                        if res.get("status") == "skipped":
+                            for cid, entry in coverage_map.items():
+                                if entry.module == ModuleId.PARAMETERS:
+                                    entry.status = CheckStatus.SKIPPED
+                                    entry.reason_code = res.get("reason", "NO_PARAMETERS_FOUND")
+                        else:
+                            for cid, entry in coverage_map.items():
+                                if entry.module == ModuleId.PARAMETERS:
+                                    entry.status = CheckStatus.COMPLETED
 
                     elif mod == ModuleId.HEADER_PROBES:
                         if not discovered_links and root_response:
@@ -291,6 +308,8 @@ class WebScanEngine:
                         )
                         res = await load_mod.run()
                         load_metrics_data = res.get("metrics")
+                        mod_findings = res.get("findings", [])
+                        all_raw_findings.extend(mod_findings)
                         all_observations.extend(res.get("observations", []))
 
                         for cid, entry in coverage_map.items():
@@ -358,9 +377,41 @@ class WebScanEngine:
             all_errors.append(err)
             await self._emit_event("error_added", err)
         finally:
+            # Harvest recorded network errors from http_client (F-08, F-11)
+            for req_err in http_client.recorded_errors:
+                err = ScanError(
+                    id=str(uuid.uuid4()),
+                    scan_id=self.scan_id,
+                    module=None,
+                    code="NETWORK_REQUEST_FAILED",
+                    stage=ErrorStage.MODULE_EXECUTION,
+                    message=req_err.get("message", "HTTP request failed"),
+                    retryable=False,
+                    occurred_at=datetime.now(timezone.utc),
+                )
+                all_errors.append(err)
             await http_client.aclose()
 
-        # Build deduplicated findings and result summary
+        # F-08: Target unreachable taxonomy & scan state determination
+        if final_state != ScanState.CANCELLED:
+            total_attempts = http_client.ledger.attempt_count
+            total_success = http_client.ledger.success_count
+            if total_attempts > 0 and total_success == 0:
+                final_state = ScanState.FAILED
+                status_reason = "Target host unreachable or all network requests failed"
+            elif not root_response and any(m in active_modules for m in [ModuleId.HEADERS, ModuleId.COOKIES, ModuleId.FORMS]):
+                final_state = ScanState.FAILED
+                status_reason = "Target root URL unreachable"
+            elif any(e.stage == ErrorStage.MODULE_EXECUTION and e.code in ("MODULE_EXCEPTION", "MODULE_TIMEOUT") for e in all_errors):
+                final_state = ScanState.PARTIAL
+                status_reason = "Scan completed with partial module failures"
+            elif any(entry.status == CheckStatus.INCONCLUSIVE for entry in coverage_map.values()):
+                final_state = ScanState.PARTIAL
+                status_reason = "Scan completed with inconclusive checks"
+            else:
+                final_state = ScanState.COMPLETED
+
+        # Build deduplicated findings and result summary (F-16: ledger metrics passed)
         deduped_findings = deduplicate_findings(all_raw_findings, self.scan_id)
         scan_result = build_scan_result(
             findings=deduped_findings,
@@ -368,6 +419,7 @@ class WebScanEngine:
             errors_count=len(all_errors),
             load_metrics_data=load_metrics_data,
             coverage=list(coverage_map.values()),
+            request_metrics=http_client.ledger.to_metrics(),
         )
 
         if final_state != ScanState.CANCELLED:

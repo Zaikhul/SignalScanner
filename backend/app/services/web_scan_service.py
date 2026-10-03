@@ -10,6 +10,9 @@ import uuid
 from sqlalchemy import desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from fastapi import HTTPException, status
+
+from app.config import settings
 from app.core.web_scan.network_policy import (
     validate_and_normalize_target,
     validate_target_against_scope,
@@ -31,6 +34,7 @@ from app.schemas.web_scan import (
     EvidenceExcerpt,
     ModuleId,
     ScanConfiguration,
+    ScanError,
     ScanFinding,
     ScanJob,
     ScanObservation,
@@ -235,6 +239,15 @@ class WebScanService:
         req: CreateScanRequest,
         idempotency_key: Optional[str] = None,
     ) -> ScanJob:
+        # Compute canonical hash of request payload (F-24)
+        payload_data = {
+            "target": req.target,
+            "scope_id": req.scope_id,
+            "configuration": req.configuration.model_dump() if req.configuration else {},
+        }
+        canonical_payload_bytes = json.dumps(payload_data, sort_keys=True).encode("utf-8")
+        current_hash = hashlib.sha256(canonical_payload_bytes).hexdigest()
+
         # Check idempotency key if provided
         if idempotency_key:
             stmt = select(WebScanJobModel).where(
@@ -245,40 +258,150 @@ class WebScanService:
             res = await db.execute(stmt)
             existing = res.scalar_one_or_none()
             if existing:
+                if existing.idempotency_hash and existing.idempotency_hash != current_hash:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Conflict: Idempotency key reused with different scan target or configuration",
+                    )
                 return WebScanService._model_to_schema(existing)
 
         # Validate target URL and policy
         config = req.configuration or ScanConfiguration()
         allow_private = config.allow_private
 
-        # Validate Scope if specified
+        # Validate Scope if specified (F-02)
         scope_record = None
+        grant_budget: Dict[str, Any] = {}
         if req.scope_id:
             scope_record = await db.get(WebScanScopeModel, req.scope_id)
             if not scope_record or scope_record.tenant_id != tenant_id:
-                raise ValueError("Referenced scope_id does not exist")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Referenced scope_id does not exist",
+                )
             if scope_record.revoked_at:
-                raise ValueError("Referenced scope_id has been revoked")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Referenced scope_id has been revoked",
+                )
             exp = scope_record.expires_at
             if exp.tzinfo is None:
                 exp = exp.replace(tzinfo=timezone.utc)
             if exp < datetime.now(timezone.utc):
-                raise ValueError("Referenced scope_id has expired")
-            # If scope grants allow private, inherit
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Referenced scope_id has expired",
+                )
+
+            # Check assigned principal
+            assigned = scope_record.assigned_principals or []
+            if assigned and "*" not in assigned and principal_id not in assigned:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Principal '{principal_id}' is not authorized on this scope grant",
+                )
+
+            # Check privilege flags
+            if not config.tls_verify and not scope_record.allow_tls_unverified:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="TLS verification opt-out is not permitted by scope grant",
+                )
+            if config.load and not scope_record.allow_load:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Load/stress testing is not permitted by scope grant",
+                )
+            if config.mutation_profile != "none" and not scope_record.allow_header_variants:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Header variants/mutations are not permitted by scope grant",
+                )
+            if config.geolocation_enabled and not scope_record.allow_geolocation:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Geolocation assessment is not permitted by scope grant",
+                )
+
+            # Check budget limits
+            grant_budget = scope_record.budget or {}
+            if "max_concurrency" in grant_budget and config.max_concurrency > grant_budget["max_concurrency"]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Requested max_concurrency ({config.max_concurrency}) exceeds scope grant budget limit ({grant_budget['max_concurrency']})",
+                )
+            if "per_origin_concurrency" in grant_budget and config.per_origin_concurrency > grant_budget["per_origin_concurrency"]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Requested per_origin_concurrency ({config.per_origin_concurrency}) exceeds scope grant budget limit ({grant_budget['per_origin_concurrency']})",
+                )
+            if "max_requests" in grant_budget and config.max_requests > grant_budget["max_requests"]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Requested max_requests ({config.max_requests}) exceeds scope grant budget limit ({grant_budget['max_requests']})",
+                )
+            if "job_timeout_seconds" in grant_budget and config.job_timeout_seconds > grant_budget["job_timeout_seconds"]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Requested job_timeout_seconds ({config.job_timeout_seconds}) exceeds scope grant budget limit ({grant_budget['job_timeout_seconds']})",
+                )
+
+            # If scope grants allow private or loopback, inherit
             for rule in scope_record.rules:
                 if rule.get("allow_private"):
                     allow_private = True
-                    break
+                if rule.get("allow_loopback"):
+                    allow_loopback = True
 
-        norm_target, display_target = validate_and_normalize_target(
-            req.target,
-            allow_private=allow_private,
-        )
+        allow_loopback = getattr(config, "allow_loopback", False) if config else False
+
+        # Check server-level private network enforcement
+        if allow_private and not settings.WEB_SCAN_ALLOW_PRIVATE_NETWORKS:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Private network scans are prohibited by server configuration",
+            )
+
+        try:
+            norm_target, display_target = validate_and_normalize_target(
+                req.target,
+                allow_private=allow_private,
+                allow_loopback=allow_loopback,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid scan target URL: {exc}",
+            )
 
         if scope_record:
-            is_valid, reason = validate_target_against_scope(norm_target, scope_record.rules)
+            load_method = config.load.method if config.load else None
+            is_valid, reason = validate_target_against_scope(
+                norm_target,
+                scope_record.rules,
+                method=load_method,
+            )
             if not is_valid:
-                raise ValueError(f"Target URL is outside authorized scope: {reason}")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Target URL is outside authorized scope: {reason}",
+                )
+
+        # Compute effective configuration (intersecting request, grant budget, and server caps)
+        eff_config = config.model_dump()
+        eff_config["max_concurrency"] = min(
+            config.max_concurrency,
+            settings.WEB_SCAN_GLOBAL_MAX_CONCURRENCY,
+            grant_budget.get("max_concurrency", settings.WEB_SCAN_GLOBAL_MAX_CONCURRENCY) if scope_record else settings.WEB_SCAN_GLOBAL_MAX_CONCURRENCY,
+        )
+        eff_config["per_origin_concurrency"] = min(
+            config.per_origin_concurrency,
+            settings.WEB_SCAN_PER_ORIGIN_CONCURRENCY,
+            grant_budget.get("per_origin_concurrency", settings.WEB_SCAN_PER_ORIGIN_CONCURRENCY) if scope_record else settings.WEB_SCAN_PER_ORIGIN_CONCURRENCY,
+        )
+        if not (scope_record and scope_record.allow_load) and not config.load:
+            if ModuleId.STRESS in eff_config.get("modules", []):
+                eff_config["modules"] = [m for m in eff_config["modules"] if m != ModuleId.STRESS]
 
         now = datetime.now(timezone.utc)
         job_id = str(uuid.uuid4())
@@ -287,6 +410,7 @@ class WebScanService:
             tenant_id=tenant_id,
             created_by=principal_id,
             idempotency_key=idempotency_key,
+            idempotency_hash=current_hash,
             scope_id=scope_record.id if scope_record else None,
             scope_revision=scope_record.revision if scope_record else 1,
             scope_hash=scope_record.scope_hash if scope_record else "inline_scope",
@@ -294,7 +418,7 @@ class WebScanService:
             normalized_target=norm_target,
             target_display=display_target,
             requested_configuration=config.model_dump(),
-            effective_configuration=config.model_dump(),
+            effective_configuration=eff_config,
             status=ScanState.PENDING.value,
             version=1,
             created_at=now,
@@ -438,10 +562,31 @@ class WebScanService:
         summary_data = job.summary_data or {}
         result = ScanResult(**summary_data) if summary_data else ScanResult()
 
+        errors_list: List[ScanError] = []
+        if "errors" in summary_data and isinstance(summary_data["errors"], list):
+            for e in summary_data["errors"]:
+                try:
+                    errors_list.append(ScanError(**e) if isinstance(e, dict) else e)
+                except Exception:
+                    pass
+        else:
+            # Reconstruct from error_added events if not directly present in summary_data (F-11)
+            stmt_errs = select(WebScanEventRecordModel).where(
+                WebScanEventRecordModel.scan_id == scan_id,
+                WebScanEventRecordModel.type == "error_added",
+            ).order_by(WebScanEventRecordModel.sequence)
+            err_records = (await db.execute(stmt_errs)).scalars().all()
+            for rec in err_records:
+                try:
+                    payload = rec.payload or {}
+                    errors_list.append(ScanError(**payload))
+                except Exception:
+                    pass
+
         return ScanSnapshot(
             job=job_schema,
             result=result,
-            errors=[],
+            errors=errors_list,
         )
 
     @staticmethod
@@ -628,24 +773,31 @@ class WebScanService:
         ticket: str,
     ) -> Optional[Dict[str, Any]]:
         ticket_hash = hashlib.sha256(ticket.encode("utf-8")).hexdigest()
-        stmt = select(WebScanWsTicketModel).where(
-            WebScanWsTicketModel.ticket_hash == ticket_hash,
-            WebScanWsTicketModel.consumed_at.is_(None),
+        now = datetime.now(timezone.utc)
+
+        # Atomic conditional UPDATE to ensure single-use even under concurrent handshake race (F-20)
+        update_stmt = (
+            update(WebScanWsTicketModel)
+            .where(
+                WebScanWsTicketModel.ticket_hash == ticket_hash,
+                WebScanWsTicketModel.consumed_at.is_(None),
+                WebScanWsTicketModel.expires_at > now,
+            )
+            .values(consumed_at=now)
         )
+        res_update = await db.execute(update_stmt)
+        if res_update.rowcount != 1:
+            await db.rollback()
+            return None
+
+        # Fetch record context
+        stmt = select(WebScanWsTicketModel).where(WebScanWsTicketModel.ticket_hash == ticket_hash)
         res = await db.execute(stmt)
         record = res.scalar_one_or_none()
+        await db.commit()
         if not record:
             return None
 
-        now = datetime.now(timezone.utc)
-        exp = record.expires_at
-        if exp.tzinfo is None:
-            exp = exp.replace(tzinfo=timezone.utc)
-        if exp < now:
-            return None
-
-        record.consumed_at = now
-        await db.commit()
         return {
             "scan_id": record.scan_id,
             "principal_id": record.principal_id,

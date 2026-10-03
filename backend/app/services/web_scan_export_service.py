@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.web_scan.network_policy import redact_url_query_params
+from app.core.web_scan.result_processor import score_to_risk_band
 from app.db.web_scan_models import (
     WebScanAuditRecordModel,
     WebScanFindingModel,
@@ -15,6 +17,18 @@ from app.db.web_scan_models import (
     WebScanObservationModel,
 )
 from app.schemas.web_scan import ScanJob, ScanResult, ScanSnapshot, Severity
+
+
+def _sanitize_evidence(evidence: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Ensures all URL strings in evidence have query parameters redacted (F-18)."""
+    if not evidence:
+        return {}
+    sanitized = dict(evidence)
+    if "url_display" in sanitized and isinstance(sanitized["url_display"], str):
+        sanitized["url_display"] = redact_url_query_params(sanitized["url_display"])
+    if "url" in sanitized and isinstance(sanitized["url"], str):
+        sanitized["url"] = redact_url_query_params(sanitized["url"])
+    return sanitized
 
 
 class WebScanExportService:
@@ -107,8 +121,8 @@ class WebScanExportService:
             "schema_version": "web_scan.v1",
             "job": {
                 "id": job.id,
-                "target": job.normalized_target,
-                "target_display": job.target_display,
+                "target": redact_url_query_params(job.normalized_target),
+                "target_display": redact_url_query_params(job.target_display),
                 "status": job.status,
                 "status_reason": job.status_reason,
                 "created_at": job.created_at.isoformat() if job.created_at else None,
@@ -128,7 +142,7 @@ class WebScanExportService:
                     "confidence": f.confidence,
                     "description": f.description,
                     "remediation": f.remediation,
-                    "evidence": f.evidence,
+                    "evidence": _sanitize_evidence(f.evidence),
                     "fingerprint": f.fingerprint,
                     "occurrence_count": f.occurrence_count,
                     "first_seen_at": f.first_seen_at.isoformat() if f.first_seen_at else None,
@@ -157,7 +171,7 @@ class WebScanExportService:
 
         v2_indices = summary.get("legacy_indices", {}).get("v2", {})
         risk_score = v2_indices.get("value", 0)
-        risk_level = "CRITICAL" if risk_score > 70 else ("HIGH" if risk_score > 40 else "LOW")
+        risk_level = score_to_risk_band(risk_score).upper()
 
         # Extract technologies, subdomains, directories from observations
         technologies = []
@@ -186,7 +200,7 @@ class WebScanExportService:
 
         report_dict = {
             "scan_id": job.id,
-            "target": job.normalized_target,
+            "target": redact_url_query_params(job.normalized_target),
             "profile": (job.effective_configuration or {}).get("profile", "v2"),
             "start_time": start_ts,
             "end_time": end_ts,
@@ -203,7 +217,7 @@ class WebScanExportService:
                     "category": f.source_category or f.category,
                     "severity": f.severity.upper(),
                     "description": f.description,
-                    "url": (f.evidence or {}).get("url_display", job.normalized_target),
+                    "url": redact_url_query_params((f.evidence or {}).get("url_display", job.normalized_target)),
                     "param": "",
                     "evidence": (
                         (f.evidence.get("excerpts", [{}])[0].get("value_redacted", ""))
@@ -233,7 +247,7 @@ class WebScanExportService:
             "SIGNAL SCANNER - WEB SECURITY AUDIT REPORT",
             "=" * 70,
             f"Job ID:      {job.id}",
-            f"Target:      {job.target_display}",
+            f"Target:      {redact_url_query_params(job.target_display)}",
             f"Status:      {job.status.upper()}",
             f"Created At:  {job.created_at.isoformat() if job.created_at else 'N/A'}",
             f"Started At:  {job.started_at.isoformat() if job.started_at else 'N/A'}",
@@ -263,7 +277,7 @@ class WebScanExportService:
                 lines.append(f"    Remediation: {f.remediation}")
                 evidence = f.evidence or {}
                 if evidence.get("url_display"):
-                    lines.append(f"    Target URL:  {evidence.get('url_display')}")
+                    lines.append(f"    Target URL:  {redact_url_query_params(evidence.get('url_display'))}")
 
         lines.append("\n" + "=" * 70)
         content = "\n".join(lines)
@@ -282,7 +296,7 @@ class WebScanExportService:
         lines = [
             "-- Signal Scanner Web Audit Data-Only Log Export",
             f"-- Generated for Scan: {job.id}",
-            f"-- Target: {job.target_display}",
+            f"-- Target: {redact_url_query_params(job.target_display)}",
             f"-- Date: {datetime.now(timezone.utc).isoformat()}",
             "",
         ]
@@ -294,14 +308,14 @@ class WebScanExportService:
             return f"'{escaped}'"
 
         for f in findings:
-            evidence_json = json.dumps(f.evidence or {})
+            evidence_json = json.dumps(_sanitize_evidence(f.evidence))
             now_iso = f.first_seen_at.isoformat() if f.first_seen_at else datetime.now(timezone.utc).isoformat()
             stmt = (
                 f"INSERT INTO breaker_logs "
                 f"(scan_id, target, check_id, title, severity, category, evidence, created_at) "
                 f"VALUES ("
                 f"{escape_sql(f.scan_id)}, "
-                f"{escape_sql(job.normalized_target)}, "
+                f"{escape_sql(redact_url_query_params(job.normalized_target))}, "
                 f"{escape_sql(f.check_id)}, "
                 f"{escape_sql(f.title)}, "
                 f"{escape_sql(f.severity)}, "

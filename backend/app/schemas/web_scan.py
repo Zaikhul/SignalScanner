@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Union
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ScanState(str, enum.Enum):
@@ -74,6 +74,7 @@ class ErrorStage(str, enum.Enum):
     RESPONSE = "response"
     PARSE = "parse"
     MODULE = "module"
+    MODULE_EXECUTION = "module_execution"
     STORAGE = "storage"
     STREAM = "stream"
     EXPORT = "export"
@@ -140,10 +141,11 @@ class ScanConfiguration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     profile: ProfileId = ProfileId.V2
-    modules: List[ModuleId] = Field(default_factory=lambda: [ModuleId.RECON, ModuleId.HEADERS, ModuleId.COOKIES])
+    modules: Optional[List[ModuleId]] = None
     timeout_seconds: float = Field(default=600.0, ge=1.0, le=3600.0)
     tls_verify: bool = True
     allow_private: bool = False
+    allow_loopback: bool = False
     max_concurrency: int = Field(default=10000, ge=1, le=10000)
     per_origin_concurrency: int = Field(default=5000, ge=1, le=10000)
     requests_per_second: float = Field(default=1000.0, ge=0.5, le=10000.0)
@@ -156,6 +158,33 @@ class ScanConfiguration(BaseModel):
     mutation_profile: Literal["none", "source_v75_approved"] = "none"
     random_seed: int = Field(default=310, ge=0)
     load: Optional[LoadConfiguration] = None
+
+    @model_validator(mode="after")
+    def populate_default_modules(self) -> "ScanConfiguration":
+        if self.modules is None:
+            if self.profile == ProfileId.LEGACY_V47:
+                self.modules = [ModuleId.RECON, ModuleId.FORMS, ModuleId.PARAMETERS]
+            elif self.profile == ProfileId.LEGACY_V75:
+                self.modules = [
+                    ModuleId.RECON,
+                    ModuleId.FORMS,
+                    ModuleId.PARAMETERS,
+                    ModuleId.HEADER_PROBES,
+                    ModuleId.STRESS,
+                ]
+            elif self.profile == ProfileId.COMPREHENSIVE:
+                self.modules = [
+                    ModuleId.RECON,
+                    ModuleId.HEADERS,
+                    ModuleId.COOKIES,
+                    ModuleId.FORMS,
+                    ModuleId.PARAMETERS,
+                    ModuleId.HEADER_PROBES,
+                    ModuleId.STRESS,
+                ]
+            else:
+                self.modules = [ModuleId.RECON, ModuleId.HEADERS, ModuleId.COOKIES]
+        return self
 
 
 class CreateScanRequest(BaseModel):

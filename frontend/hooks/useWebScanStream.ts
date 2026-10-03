@@ -19,6 +19,7 @@ export function useWebScanStream(scanId: string | null, enabled: boolean = true)
     setSnapshot,
     setActiveJob,
     setProgress,
+    setFindings,
     upsertFinding,
     addObservation,
     addEvent,
@@ -40,10 +41,36 @@ export function useWebScanStream(scanId: string | null, enabled: boolean = true)
     }
 
     let isCancelled = false;
+    lastSequenceRef.current = 0;
+
+    function reconcileTerminalData() {
+      if (!scanId || isCancelled) return;
+      webScanApiClient
+        .getSnapshot(scanId)
+        .then((snap) => {
+          if (!isCancelled && snap) {
+            setSnapshot(snap);
+          }
+        })
+        .catch(() => {});
+      webScanApiClient
+        .listFindings(scanId, { limit: 200 })
+        .then((res) => {
+          if (!isCancelled && res && res.items) {
+            setFindings(res.items);
+          }
+        })
+        .catch(() => {});
+    }
 
     function applyEvent(data: any) {
       if (!data) return;
-      if (data.sequence && data.sequence > lastSequenceRef.current) {
+
+      // Drop duplicate or out-of-order events (F-13)
+      if (typeof data.sequence === "number") {
+        if (data.sequence <= lastSequenceRef.current) {
+          return;
+        }
         lastSequenceRef.current = data.sequence;
       }
 
@@ -61,15 +88,19 @@ export function useWebScanStream(scanId: string | null, enabled: boolean = true)
         setProgress(pct, mod);
       } else if (type === "state_changed" && payload) {
         const currentJob = useWebScanStore.getState().activeJob;
+        const nextStatus =
+          typeof payload === "string"
+            ? payload
+            : (payload.status || payload.state || (currentJob ? currentJob.status : ""));
         if (currentJob) {
-          const nextStatus =
-            typeof payload === "string"
-              ? payload
-              : (payload.status || payload.state || currentJob.status);
           setActiveJob({ ...currentJob, status: nextStatus });
+        }
+        if (["completed", "failed", "partial", "cancelled"].includes(nextStatus)) {
           if (nextStatus === "completed") {
             setProgress(100, "completed");
           }
+          // Auto-reconcile findings and snapshot on completion (F-12)
+          reconcileTerminalData();
         }
       } else if (type === "finding_upserted" && payload) {
         upsertFinding(payload);
@@ -81,14 +112,7 @@ export function useWebScanStream(scanId: string | null, enabled: boolean = true)
         if (currentJob) {
           setActiveJob({ ...currentJob, status: "completed" });
         }
-        webScanApiClient
-          .getSnapshot(scanId!)
-          .then((snap) => {
-            if (!isCancelled && snap) {
-              setSnapshot(snap);
-            }
-          })
-          .catch(() => {});
+        reconcileTerminalData();
       }
 
       addEvent(data);

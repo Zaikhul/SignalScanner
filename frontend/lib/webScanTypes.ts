@@ -88,6 +88,7 @@ export interface ScanConfiguration {
   timeout_seconds: number;
   tls_verify: boolean;
   allow_private: boolean;
+  allow_loopback?: boolean;
   max_concurrency: number;
   per_origin_concurrency: number;
   requests_per_second: number;

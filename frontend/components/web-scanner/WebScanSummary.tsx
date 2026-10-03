@@ -64,14 +64,16 @@ export function WebScanSummary() {
           Source Band:{" "}
           <span
             className={`font-semibold capitalize ${
-              v2Score > 60
+              v2Score >= 70
                 ? "text-red-400"
-                : v2Score > 30
+                : v2Score >= 50
+                ? "text-orange-400"
+                : v2Score >= 30
                 ? "text-amber-400"
                 : "text-emerald-400"
             }`}
           >
-            {v2Score > 60 ? "Critical" : v2Score > 30 ? "Moderate" : "Low"}
+            {v2Score >= 70 ? "Critical" : v2Score >= 50 ? "High" : v2Score >= 30 ? "Medium" : "Low"}
           </span>
         </div>
       </div>

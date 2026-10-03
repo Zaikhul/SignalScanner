@@ -135,3 +135,83 @@ async def test_web_scan_engine_initial_sequence():
     assert emitted_events[0].sequence == 2
     assert emitted_events[0].type == "state_changed"
     assert emitted_events[0].payload["status"] == "scanning"
+
+
+@pytest.mark.asyncio
+async def test_web_scan_engine_global_semaphore_support(monkeypatch):
+    import asyncio
+    from app.core.web_scan.engine import WebScanEngine
+    from app.core.web_scan.http_client import WebScanHttpClient
+    from app.schemas.web_scan import ScanConfiguration
+
+    sem = asyncio.Semaphore(12)
+    config = ScanConfiguration(allow_private=True, modules=[])
+    engine = WebScanEngine(
+        scan_id="test-sem-scan",
+        target_url="http://127.0.0.1:8000",
+        config=config,
+        global_semaphore=sem,
+    )
+    assert engine.global_semaphore is sem
+
+    captured_client_sem = None
+    original_init = WebScanHttpClient.__init__
+
+    def mock_http_init(self, *args, **kwargs):
+        nonlocal captured_client_sem
+        captured_client_sem = kwargs.get("global_semaphore")
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(WebScanHttpClient, "__init__", mock_http_init)
+    await engine.run()
+    assert captured_client_sem is sem
+
+
+@pytest.mark.asyncio
+async def test_web_scan_scheduler_datetime_json_serialization():
+    import asyncio
+    from app.services.web_scan_service import WebScanService
+    from app.services.web_scan_scheduler import web_scan_scheduler
+    from app.schemas.web_scan import CreateScanRequest, ScanConfiguration, ModuleId, ProfileId
+    from app.db.web_scan_models import WebScanJobModel
+
+    async with AsyncSessionLocal() as db:
+        # Create a job with unreachable target (port 1 refuses immediately)
+        req = CreateScanRequest(
+            target="http://127.0.0.1:1/unreachable",
+            authorization_acknowledged=True,
+            configuration=ScanConfiguration(
+                profile=ProfileId.V2,
+                modules=[ModuleId.RECON, ModuleId.HEADERS],
+                allow_private=True,
+            ),
+        )
+        job = await WebScanService.create_scan_job(
+            db=db,
+            tenant_id="test_tenant",
+            principal_id="test_operator",
+            req=req,
+        )
+        job_id = job.id
+    async with AsyncSessionLocal() as db:
+        job_to_queue = await db.get(WebScanJobModel, job_id)
+        job_to_queue.status = ScanState.QUEUED.value
+        await db.commit()
+
+    cancel_event = asyncio.Event()
+    await web_scan_scheduler._execute_job_wrapper(job_id, cancel_event)
+
+    async with AsyncSessionLocal() as db:
+        job_rec = await db.get(WebScanJobModel, job_id)
+        assert job_rec is not None
+        # Must NOT be an Execution error: (builtins.TypeError) Object of type datetime is not JSON serializable
+        assert "builtins.TypeError" not in (job_rec.status_reason or "")
+        assert "not JSON serializable" not in (job_rec.status_reason or "")
+        # Should have proper status_reason and summary_data saved
+        assert job_rec.status in ("failed", "partial", "completed")
+        assert job_rec.summary_data is not None
+        assert isinstance(job_rec.summary_data, dict)
+        if "errors" in job_rec.summary_data:
+            assert isinstance(job_rec.summary_data["errors"], list)
+
+

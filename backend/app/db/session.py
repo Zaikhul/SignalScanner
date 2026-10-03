@@ -1,4 +1,6 @@
+import json
 from typing import AsyncGenerator
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from app.config import settings
 from app.db.models import Base
@@ -14,6 +16,7 @@ engine = create_async_engine(
     echo=False,
     future=True,
     connect_args=connect_args,
+    json_serializer=lambda obj: json.dumps(jsonable_encoder(obj)),
 )
 
 AsyncSessionLocal = async_sessionmaker(
