@@ -10,3 +10,12 @@ def override_auth_for_legacy_tests():
     yield
     app.dependency_overrides.pop(verify_operator_auth, None)
     app.dependency_overrides.pop(verify_collector_auth, None)
+
+
+@pytest.fixture(autouse=True)
+async def dispose_db_engine():
+    """Disposes engine connection pool between async tests to prevent asyncpg loop conflicts."""
+    yield
+    from app.db.session import engine
+    await engine.dispose()
+

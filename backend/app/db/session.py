@@ -2,6 +2,7 @@ from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from app.config import settings
 from app.db.models import Base
+import app.db.web_scan_models  # Ensure tables are registered in Base.metadata for init_db()
 
 # Create async engine. For sqlite, check_same_thread is set to False
 connect_args = {}
@@ -49,6 +50,12 @@ async def init_db() -> None:
                             sync_conn.execute(text(f"ALTER TABLE measurements ADD COLUMN {col_name} {col_type}"))
                         except Exception:
                             pass
+
+            if "export_audit_logs" in inspector.get_table_names():
+                try:
+                    sync_conn.execute(text("ALTER TABLE export_audit_logs ALTER COLUMN format TYPE VARCHAR(64)"))
+                except Exception:
+                    pass
 
         await conn.run_sync(sync_upgrade_columns)
 

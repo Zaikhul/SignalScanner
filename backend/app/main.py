@@ -13,8 +13,10 @@ from app.api.v1 import (
     measurements,
     sessions,
     targets,
+    web_scan_scopes,
+    web_scans,
 )
-from app.api.ws import session_stream
+from app.api.ws import session_stream, web_scan_stream
 from app.config import settings
 from app.db.session import init_db
 
@@ -23,7 +25,15 @@ from app.db.session import init_db
 async def lifespan(app: FastAPI):
     # Initialize DB tables on startup
     await init_db()
-    yield
+    if getattr(settings, "WEB_SCANNER_ENABLED", False):
+        from app.services.web_scan_scheduler import web_scan_scheduler
+        await web_scan_scheduler.start()
+    try:
+        yield
+    finally:
+        if getattr(settings, "WEB_SCANNER_ENABLED", False):
+            from app.services.web_scan_scheduler import web_scan_scheduler
+            await web_scan_scheduler.stop()
 
 
 app = FastAPI(
@@ -52,9 +62,12 @@ app.include_router(targets.router, prefix=settings.API_V1_STR)
 app.include_router(exports.router, prefix=settings.API_V1_STR)
 app.include_router(ingest.router, prefix=settings.API_V1_STR)
 app.include_router(channel_health.router, prefix=settings.API_V1_STR)
+app.include_router(web_scans.router, prefix=settings.API_V1_STR)
+app.include_router(web_scan_scopes.router, prefix=settings.API_V1_STR)
 
-# Include WebSocket router
+# Include WebSocket routers
 app.include_router(session_stream.router)
+app.include_router(web_scan_stream.router)
 
 
 @app.get("/healthz", tags=["health"])

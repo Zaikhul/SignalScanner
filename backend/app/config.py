@@ -40,5 +40,15 @@ class Settings(BaseSettings):
     DEFAULT_NOISE_FLOOR_DBM: float = -95.0
     DEFAULT_NOISE_FLOOR_DBFS: float = -100.0
 
+    # Web Scanner (Ghost Web Scanner integration - disabled by default)
+    WEB_SCANNER_ENABLED: bool = os.getenv("WEB_SCANNER_ENABLED", "true").lower() in ("true", "1", "yes")
+    WEB_SCAN_GLOBAL_MAX_CONCURRENCY: int = int(os.getenv("WEB_SCAN_GLOBAL_MAX_CONCURRENCY", "10000"))
+    WEB_SCAN_PER_ORIGIN_CONCURRENCY: int = int(os.getenv("WEB_SCAN_PER_ORIGIN_CONCURRENCY", "5000"))
+    WEB_SCAN_DEFAULT_TIMEOUT_SEC: float = float(os.getenv("WEB_SCAN_DEFAULT_TIMEOUT_SEC", "600.0"))
+    WEB_SCAN_MAX_BODY_BYTES: int = int(os.getenv("WEB_SCAN_MAX_BODY_BYTES", str(1024 * 1024)))  # 1 MiB
+    WEB_SCAN_ALLOW_PRIVATE_NETWORKS: bool = os.getenv("WEB_SCAN_ALLOW_PRIVATE_NETWORKS", "true").lower() in ("true", "1")
+    WEB_SCAN_DEFAULT_TENANT: str = os.getenv("WEB_SCAN_DEFAULT_TENANT", "default_tenant")
+
+
 
 settings = Settings()

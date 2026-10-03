@@ -74,6 +74,13 @@ export function Header() {
           <HardDrives size={14} />
           Collector
         </Link>
+        <Link
+          href="/web-scanner"
+          className="px-3 py-1.5 rounded-[var(--radius-control)] text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition flex items-center gap-1.5"
+        >
+          <ShieldCheck size={14} />
+          Web Scanner
+        </Link>
       </nav>
 
       {/* Live Status, Source Badge & Clock */}

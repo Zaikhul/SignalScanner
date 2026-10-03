@@ -266,7 +266,7 @@ class ExportAuditLogModel(Base):
     session_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("scan_sessions.id", ondelete="CASCADE"), nullable=False
     )
-    format: Mapped[str] = mapped_column(String(16), default="json")
+    format: Mapped[str] = mapped_column(String(64), default="json")
     scope: Mapped[str] = mapped_column(String(64), default="full_session")
     checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     exported_by: Mapped[str] = mapped_column(String(64), default="anonymous_user")
