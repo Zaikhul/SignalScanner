@@ -44,6 +44,10 @@ class RequestBudgetLedger:
         self.total_aborted: int = 0
         self._lock = asyncio.Lock()
 
+    @property
+    def is_exhausted(self) -> bool:
+        return self.total_attempted >= self.max_requests
+
     async def acquire_permit(self) -> bool:
         async with self._lock:
             if self.total_attempted >= self.max_requests:
@@ -201,6 +205,7 @@ class WebScanHttpClient:
         # Ledger & Recorded errors
         self.ledger = ledger or RequestBudgetLedger(max_requests=max_requests)
         self.recorded_errors: List[Dict[str, Any]] = []
+        self._budget_exhausted_logged: bool = False
 
         # Semaphores and atomic rate limiter state
         self.global_semaphore = global_semaphore or asyncio.Semaphore(max_concurrency)
@@ -230,6 +235,10 @@ class WebScanHttpClient:
             follow_redirects=False,
             timeout=httpx.Timeout(timeout_seconds, connect=5.0),
         )
+
+    @property
+    def is_budget_exhausted(self) -> bool:
+        return self.ledger.is_exhausted
 
     def _get_user_agent(self) -> str:
         if self.user_agent_profile == "fixed" and self.fixed_user_agent:
@@ -338,13 +347,19 @@ class WebScanHttpClient:
             # 3. Budget permit check
             has_permit = await self.ledger.acquire_permit()
             if not has_permit:
-                safe_url = redact_url_query_params(current_url)
-                logger.warning("Request budget exhausted before dispatching request to %s", safe_url)
-                self.recorded_errors.append({
-                    "stage": "request",
-                    "code": "REQUEST_BUDGET_EXHAUSTED",
-                    "message": f"Budget limit of {self.ledger.max_requests} requests reached",
-                })
+                if not self._budget_exhausted_logged:
+                    self._budget_exhausted_logged = True
+                    safe_url = redact_url_query_params(current_url)
+                    logger.warning(
+                        "Request budget exhausted (%d requests reached). Subsequent requests suppressed for %s",
+                        self.ledger.max_requests,
+                        safe_url,
+                    )
+                    self.recorded_errors.append({
+                        "stage": "request",
+                        "code": "REQUEST_BUDGET_EXHAUSTED",
+                        "message": f"Budget limit of {self.ledger.max_requests} requests reached",
+                    })
                 return None
 
             # 4. Scope verification for URL & method

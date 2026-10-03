@@ -149,7 +149,7 @@ class ScanConfiguration(BaseModel):
     max_concurrency: int = Field(default=10000, ge=1, le=10000)
     per_origin_concurrency: int = Field(default=5000, ge=1, le=10000)
     requests_per_second: float = Field(default=1000.0, ge=0.5, le=10000.0)
-    max_requests: int = Field(default=10000, ge=10, le=100000)
+    max_requests: int = Field(default=10000, ge=10, le=1000000)
     job_timeout_seconds: int = Field(default=600, ge=30, le=7200)
     retry_attempts: int = Field(default=0, ge=0, le=0)
     geolocation_enabled: bool = False
@@ -163,7 +163,12 @@ class ScanConfiguration(BaseModel):
     def populate_default_modules(self) -> "ScanConfiguration":
         if self.modules is None:
             if self.profile == ProfileId.LEGACY_V47:
-                self.modules = [ModuleId.RECON, ModuleId.FORMS, ModuleId.PARAMETERS]
+                self.modules = [
+                    ModuleId.RECON,
+                    ModuleId.FORMS,
+                    ModuleId.PARAMETERS,
+                    ModuleId.STRESS,
+                ]
             elif self.profile == ProfileId.LEGACY_V75:
                 self.modules = [
                     ModuleId.RECON,
@@ -183,7 +188,16 @@ class ScanConfiguration(BaseModel):
                     ModuleId.STRESS,
                 ]
             else:
-                self.modules = [ModuleId.RECON, ModuleId.HEADERS, ModuleId.COOKIES]
+                self.modules = [
+                    ModuleId.RECON,
+                    ModuleId.HEADERS,
+                    ModuleId.COOKIES,
+                    ModuleId.HEADER_PROBES,
+                ]
+
+        if self.modules and (ModuleId.STRESS in self.modules or ModuleId.LOAD in self.modules):
+            if self.load is None:
+                self.load = LoadConfiguration()
         return self
 
 

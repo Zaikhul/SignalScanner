@@ -17,6 +17,7 @@ export function WebScanControls() {
   const [timeoutSec, setTimeoutSec] = useState(600);
   const [maxConcurrency, setMaxConcurrency] = useState(10000);
   const [rps, setRps] = useState(1000.0);
+  const [maxRequests, setMaxRequests] = useState(10000);
   const [submitting, setSubmitting] = useState(false);
 
   async function handleStartScan(e: React.FormEvent) {
@@ -34,6 +35,7 @@ export function WebScanControls() {
       allow_loopback: allowPrivate,
       max_concurrency: maxConcurrency,
       requests_per_second: rps,
+      max_requests: maxRequests,
     };
 
     try {
@@ -148,7 +150,7 @@ export function WebScanControls() {
 
         {/* Advanced Configuration Accordion */}
         {showAdvanced && (
-          <div className="pt-3 border-t border-white/5 grid grid-cols-1 sm:grid-cols-4 gap-4 text-xs">
+          <div className="pt-3 border-t border-white/5 grid grid-cols-1 sm:grid-cols-5 gap-4 text-xs">
             <div>
               <label className="block text-zinc-400 mb-1">Timeout (seconds)</label>
               <input
@@ -182,6 +184,19 @@ export function WebScanControls() {
                 step="1"
                 value={rps}
                 onChange={(e) => setRps(Number(e.target.value))}
+                disabled={isScanning}
+                className="w-full bg-zinc-950 border border-white/10 rounded px-2.5 py-1.5 text-zinc-200"
+              />
+            </div>
+            <div>
+              <label className="block text-zinc-400 mb-1">Max Requests (Budget)</label>
+              <input
+                type="number"
+                min="10"
+                max="1000000"
+                step="1000"
+                value={maxRequests}
+                onChange={(e) => setMaxRequests(Number(e.target.value))}
                 disabled={isScanning}
                 className="w-full bg-zinc-950 border border-white/10 rounded px-2.5 py-1.5 text-zinc-200"
               />

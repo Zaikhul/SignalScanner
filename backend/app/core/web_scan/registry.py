@@ -253,25 +253,28 @@ PROFILES: List[ProfileDescriptor] = [
     ProfileDescriptor(
         profile_id=ProfileId.V2,
         name="Ghost v2.0 Standard Profile",
-        description="Reconnaissance, 6 Security Header families, and Cookie audit (non-invasive)",
-        modules=[ModuleId.RECON, ModuleId.HEADERS, ModuleId.COOKIES],
+        description="Reconnaissance, 6 Security Header families, Cookie audit, and Header timing probes (non-invasive)",
+        modules=[ModuleId.RECON, ModuleId.HEADERS, ModuleId.COOKIES, ModuleId.HEADER_PROBES],
         default_checks=[
             "recon.server_banner", "recon.waf_detection", "recon.cms_detection",
             "recon.subdomain_enumeration", "recon.path_enumeration",
             "headers.csp", "headers.hsts", "headers.x_frame_options",
             "headers.x_content_type_options", "headers.permissions_policy", "headers.referrer_policy",
             "cookies.httponly", "cookies.secure", "cookies.samesite",
+            "header_probes.time_based_sql",
         ],
     ),
     ProfileDescriptor(
         profile_id=ProfileId.LEGACY_V47,
-        name="Ghost v47 Legacy Force & Brute",
-        description="Subdomain brute, directory brute, form discovery, and parameter error matching",
-        modules=[ModuleId.RECON, ModuleId.FORMS, ModuleId.PARAMETERS],
+        name="Ghost v47 Legacy Force & Brute (Heuristics & Stress)",
+        description="Subdomain brute, directory brute, form discovery, parameter heuristics, and bounded stress test",
+        modules=[ModuleId.RECON, ModuleId.FORMS, ModuleId.PARAMETERS, ModuleId.STRESS],
         default_checks=[
+            "recon.server_banner", "recon.waf_detection", "recon.cms_detection",
             "recon.subdomain_enumeration", "recon.path_enumeration",
             "forms.weak_login_get", "forms.missing_csrf_token",
             "parameters.sql_error_matching", "parameters.xss_reflection",
+            "stress.bounded_load_test",
         ],
     ),
     ProfileDescriptor(
@@ -285,7 +288,9 @@ PROFILES: List[ProfileDescriptor] = [
             "forms.weak_login_get", "forms.missing_csrf_token",
             "parameters.sql_error_matching", "parameters.xss_reflection",
             "parameters.time_based_delay", "parameters.boolean_length_delta",
+            "parameters.lfi_auth_bypass_indicator",
             "header_probes.time_based_sql",
+            "stress.bounded_load_test",
         ],
     ),
     ProfileDescriptor(

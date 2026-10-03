@@ -14,9 +14,30 @@ def override_auth_for_legacy_tests():
 
 @pytest.fixture(autouse=True)
 async def ensure_db_init():
-    """Initializes tables for test database."""
-    from app.db.session import init_db
+    """Initializes tables for test database and ensures isolation across test runs."""
+    from app.db.session import init_db, AsyncSessionLocal
     await init_db()
+    async with AsyncSessionLocal() as session:
+        from app.db.web_scan_models import (
+            WebScanFindingModel,
+            WebScanObservationModel,
+            WebScanEventRecordModel,
+            WebScanWsTicketModel,
+            WebScanAuditRecordModel,
+            WebScanJobModel,
+            WebScanScopeModel,
+        )
+        for model in (
+            WebScanFindingModel,
+            WebScanObservationModel,
+            WebScanEventRecordModel,
+            WebScanWsTicketModel,
+            WebScanAuditRecordModel,
+            WebScanJobModel,
+            WebScanScopeModel,
+        ):
+            await session.execute(model.__table__.delete())
+        await session.commit()
     yield
 
 

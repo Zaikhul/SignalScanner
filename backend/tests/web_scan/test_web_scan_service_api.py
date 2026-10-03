@@ -215,3 +215,63 @@ async def test_web_scan_scheduler_datetime_json_serialization():
             assert isinstance(job_rec.summary_data["errors"], list)
 
 
+@pytest.mark.asyncio
+async def test_legacy_v47_profile_stress_module_execution_and_findings():
+    import httpx
+    from app.services.web_scan_service import WebScanService
+    from app.schemas.web_scan import CreateScanRequest, ScanConfiguration, ModuleId, ProfileId
+    from app.core.web_scan.modules.load_resilience import LoadResilienceModule
+    from app.core.web_scan.http_client import WebScanHttpClient
+    from app.core.web_scan.result_processor import deduplicate_findings
+
+    # 1. Verify ScanConfiguration populates STRESS and load config for LEGACY_V47
+    cfg = ScanConfiguration(profile=ProfileId.LEGACY_V47, allow_private=True)
+    assert ModuleId.STRESS in cfg.modules
+    assert ModuleId.RECON in cfg.modules
+    assert cfg.load is not None
+
+    # 2. Verify WebScanService.create_scan_job retains STRESS in effective_configuration
+    async with AsyncSessionLocal() as db:
+        req = CreateScanRequest(
+            target="http://127.0.0.1:8000/test",
+            authorization_acknowledged=True,
+            configuration=cfg,
+        )
+        job = await WebScanService.create_scan_job(
+            db=db,
+            tenant_id="test_tenant",
+            principal_id="test_operator",
+            req=req,
+        )
+        assert ModuleId.STRESS in (job.effective_configuration.modules or [])
+        assert job.effective_configuration.load is not None
+        assert job.effective_configuration.load.concurrency > 0
+
+    # 3. Verify LoadResilienceModule emits a benchmark finding even on a resilient 200 OK target
+    def handler(request: httpx.Request):
+        return httpx.Response(200, text="OK", request=request)
+
+    transport = httpx.MockTransport(handler)
+    client = WebScanHttpClient(target_url="http://mock.test", transport=transport)
+    try:
+        quick_load_cfg = cfg.load.model_copy(update={"concurrency": 1, "duration_seconds": 1, "delay_seconds": 0.05})
+        mod = LoadResilienceModule(client, "http://mock.test", load_config=quick_load_cfg)
+        res = await mod.run()
+        raw_findings = res["findings"]
+        assert len(raw_findings) >= 1
+
+        stress_finding = raw_findings[0]
+        assert stress_finding["module"] == "stress"
+        assert stress_finding["check_id"] == "stress.bounded_load_test"
+        assert stress_finding["severity"] == "info"
+        assert "Target Stable" in stress_finding["title"]
+
+        # 4. Verify canonical deduplication correctly identifies module as ModuleId.STRESS
+        deduped = deduplicate_findings(raw_findings, scan_id=job.id)
+        assert len(deduped) == 1
+        assert deduped[0].module == ModuleId.STRESS
+        assert deduped[0].check_id == "stress.bounded_load_test"
+    finally:
+        await client.aclose()
+
+

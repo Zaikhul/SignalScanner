@@ -77,7 +77,7 @@ export function WebFindingTable() {
             <option value="forms">Forms</option>
             <option value="parameters">Parameters</option>
             <option value="header_probes">Header Probes</option>
-            <option value="stress">Load</option>
+            <option value="stress">Stress / Load</option>
           </select>
         </div>
       </div>

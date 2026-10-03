@@ -32,6 +32,7 @@ from app.schemas.web_scan import (
     CreateScopeGrant,
     Evidence,
     EvidenceExcerpt,
+    LoadConfiguration,
     ModuleId,
     ScanConfiguration,
     ScanError,
@@ -399,9 +400,11 @@ class WebScanService:
             settings.WEB_SCAN_PER_ORIGIN_CONCURRENCY,
             grant_budget.get("per_origin_concurrency", settings.WEB_SCAN_PER_ORIGIN_CONCURRENCY) if scope_record else settings.WEB_SCAN_PER_ORIGIN_CONCURRENCY,
         )
-        if not (scope_record and scope_record.allow_load) and not config.load:
-            if ModuleId.STRESS in eff_config.get("modules", []):
+        if ModuleId.STRESS in eff_config.get("modules", []):
+            if scope_record and not scope_record.allow_load:
                 eff_config["modules"] = [m for m in eff_config["modules"] if m != ModuleId.STRESS]
+            elif not eff_config.get("load"):
+                eff_config["load"] = (config.load or LoadConfiguration()).model_dump()
 
         now = datetime.now(timezone.utc)
         job_id = str(uuid.uuid4())

@@ -140,5 +140,63 @@ describe("useWebScanStore", () => {
     expect(useWebScanStore.getState().isScanning).toBe(false);
     expect(useWebScanStore.getState().progressPercent).toBe(100);
   });
+
+  it("should accurately track findings by module including recon and stress", () => {
+    const store = useWebScanStore.getState();
+
+    const reconFinding: ScanFinding = {
+      id: "f_recon",
+      scan_id: "scan_v47",
+      module: "recon",
+      check_id: "recon.server_banner",
+      category: "information_disclosure",
+      severity: "info",
+      severity_reason: "Banner disclosed",
+      confidence: "confirmed_configuration",
+      title: "Server Banner Disclosed",
+      description: "Server header",
+      remediation: "Mask header",
+      evidence: { url_display: "https://example.com", body_truncated: false } as any,
+      fingerprint: "recon:banner:example.com",
+      occurrence_count: 1,
+      assessment_version: "web_scan.v1",
+      first_seen_at: new Date().toISOString(),
+      last_seen_at: new Date().toISOString(),
+    };
+
+    const stressFinding: ScanFinding = {
+      id: "f_stress",
+      scan_id: "scan_v47",
+      module: "stress",
+      check_id: "stress.bounded_load_test",
+      category: "service_resilience",
+      severity: "info",
+      severity_reason: "Target stable under load",
+      confidence: "confirmed_configuration",
+      title: "Bounded Load Resilience Benchmark: Target Stable",
+      description: "Target sustained load",
+      remediation: "None required",
+      evidence: { url_display: "https://example.com", body_truncated: false } as any,
+      fingerprint: "stress:stable:example.com",
+      occurrence_count: 1,
+      assessment_version: "web_scan.v1",
+      first_seen_at: new Date().toISOString(),
+      last_seen_at: new Date().toISOString(),
+    };
+
+    store.upsertFinding(reconFinding);
+    store.upsertFinding(stressFinding);
+
+    const findings = useWebScanStore.getState().findings;
+    expect(findings.length).toBe(2);
+
+    const byModule: Record<string, number> = {};
+    for (const f of findings) {
+      byModule[f.module] = (byModule[f.module] || 0) + 1;
+    }
+
+    expect(byModule["recon"]).toBe(1);
+    expect(byModule["stress"]).toBe(1);
+  });
 });
 

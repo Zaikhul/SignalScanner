@@ -217,3 +217,47 @@ async def test_load_resilience_cooperative_cancellation():
     finally:
         await client.aclose()
 
+
+@pytest.mark.asyncio
+async def test_load_resilience_stops_cleanly_on_budget_exhaustion():
+    def handler(request: httpx.Request):
+        return httpx.Response(200, text="OK", request=request)
+
+    transport = httpx.MockTransport(handler)
+    # Small budget: exactly 5 requests
+    client = WebScanHttpClient(target_url="http://mock.test", transport=transport, max_requests=5)
+
+    try:
+        cfg = LoadConfiguration(method="GET", concurrency=4, duration_seconds=5, delay_seconds=0.01)
+        mod = LoadResilienceModule(client, "http://mock.test", load_config=cfg)
+        res = await mod.run()
+        metrics = res["metrics"]
+        findings = res["findings"]
+
+        # Exactly 5 requests dispatched before budget hit
+        assert client.ledger.total_attempted == 5
+        assert client.is_budget_exhausted is True
+        assert metrics["budget_exhausted"] == 1
+        # Crucial: budget rejection must NOT be counted as target network failure!
+        assert metrics["network_failed"] == 0
+        assert metrics["legacy_failure"] == 0
+        # Workers stopped cleanly so recorded_errors remained <= 1
+        assert len(client.recorded_errors) <= 1
+
+        # Explicit fetch on exhausted client returns None and records error exactly once
+        overflow_resp = await client.fetch("http://mock.test/overflow")
+        assert overflow_resp is None
+        assert len(client.recorded_errors) == 1
+        assert client.recorded_errors[0]["code"] == "REQUEST_BUDGET_EXHAUSTED"
+
+        # Calling fetch() a second time on exhausted client does not create duplicate errors
+        overflow_resp_2 = await client.fetch("http://mock.test/overflow2")
+        assert overflow_resp_2 is None
+        assert len(client.recorded_errors) == 1
+
+        # Since all 5 succeeded with 200 OK, target is recognized as stable (info finding, not high severity)
+        assert any(f["severity"] == "info" for f in findings)
+        assert not any(f["severity"] == "high" for f in findings)
+    finally:
+        await client.aclose()
+

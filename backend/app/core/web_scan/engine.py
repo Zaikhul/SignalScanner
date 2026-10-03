@@ -383,7 +383,7 @@ class WebScanEngine:
                     id=str(uuid.uuid4()),
                     scan_id=self.scan_id,
                     module=None,
-                    code="NETWORK_REQUEST_FAILED",
+                    code=req_err.get("code", "NETWORK_REQUEST_FAILED"),
                     stage=ErrorStage.MODULE_EXECUTION,
                     message=req_err.get("message", "HTTP request failed"),
                     retryable=False,

@@ -28,6 +28,55 @@ def test_capabilities_catalog_traceability():
         assert expected_c in c_ids, f"Capability {expected_c} missing from catalog"
 
 
+def test_profile_module_registration_completeness():
+    from app.schemas.web_scan import ScanConfiguration, ModuleId
+
+    caps = get_capabilities()
+    profiles_by_id = {p.profile_id: p for p in caps.profiles}
+
+    # 1. Profile V2 (Recon + 6 Headers + Cookies + Probes)
+    v2_desc = profiles_by_id[ProfileId.V2]
+    assert ModuleId.RECON in v2_desc.modules
+    assert ModuleId.HEADERS in v2_desc.modules
+    assert ModuleId.COOKIES in v2_desc.modules
+    assert ModuleId.HEADER_PROBES in v2_desc.modules
+    assert "header_probes.time_based_sql" in v2_desc.default_checks
+
+    v2_cfg = ScanConfiguration(profile=ProfileId.V2)
+    assert set(v2_cfg.modules) == set(v2_desc.modules)
+
+    # 2. Profile LEGACY_V47 (V47 Heuristics & Stress)
+    v47_desc = profiles_by_id[ProfileId.LEGACY_V47]
+    assert ModuleId.RECON in v47_desc.modules
+    assert ModuleId.FORMS in v47_desc.modules
+    assert ModuleId.PARAMETERS in v47_desc.modules
+    assert ModuleId.STRESS in v47_desc.modules
+    assert "stress.bounded_load_test" in v47_desc.default_checks
+
+    v47_cfg = ScanConfiguration(profile=ProfileId.LEGACY_V47)
+    assert set(v47_cfg.modules) == set(v47_desc.modules)
+
+    # 3. Profile LEGACY_V75 (V75 14 Weights Audit)
+    v75_desc = profiles_by_id[ProfileId.LEGACY_V75]
+    assert ModuleId.RECON in v75_desc.modules
+    assert ModuleId.FORMS in v75_desc.modules
+    assert ModuleId.PARAMETERS in v75_desc.modules
+    assert ModuleId.HEADER_PROBES in v75_desc.modules
+    assert ModuleId.STRESS in v75_desc.modules
+    assert "parameters.lfi_auth_bypass_indicator" in v75_desc.default_checks
+    assert "stress.bounded_load_test" in v75_desc.default_checks
+
+    v75_cfg = ScanConfiguration(profile=ProfileId.LEGACY_V75)
+    assert set(v75_cfg.modules) == set(v75_desc.modules)
+
+    # 4. Profile COMPREHENSIVE (All 7 modules)
+    comp_desc = profiles_by_id[ProfileId.COMPREHENSIVE]
+    assert len(comp_desc.modules) == 7
+    comp_cfg = ScanConfiguration(profile=ProfileId.COMPREHENSIVE)
+    assert len(comp_cfg.modules) == 7
+    assert set(comp_cfg.modules) == set(comp_desc.modules)
+
+
 @pytest.mark.asyncio
 async def test_authorization_principal_validation():
     # Valid Bearer token

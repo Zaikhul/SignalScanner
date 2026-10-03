@@ -52,12 +52,20 @@ class LoadResilienceModule:
 
         start_time = time.monotonic()
         end_deadline = start_time + duration_sec
+        budget_exhausted = False
+        budget_event = asyncio.Event()
 
         async def worker():
             nonlocal attempted, http_2xx_3xx, http_4xx, http_5xx, http_other
             nonlocal network_failed, legacy_success_lt_500, legacy_failure, rate_limited
+            nonlocal budget_exhausted
 
-            while time.monotonic() < end_deadline and not self.cancel_event.is_set():
+            while time.monotonic() < end_deadline and not self.cancel_event.is_set() and not budget_event.is_set():
+                if getattr(self.http, "is_budget_exhausted", False):
+                    budget_exhausted = True
+                    budget_event.set()
+                    break
+
                 attempted += 1
                 resp = await self.http.fetch(
                     self.target_url,
@@ -67,6 +75,11 @@ class LoadResilienceModule:
                 )
 
                 if resp is None:
+                    if getattr(self.http, "is_budget_exhausted", False):
+                        budget_exhausted = True
+                        budget_event.set()
+                        attempted = max(0, attempted - 1)
+                        break
                     network_failed += 1
                     legacy_failure += 1
                 else:
@@ -87,10 +100,27 @@ class LoadResilienceModule:
                         legacy_failure += 1
 
                 if delay_sec > 0:
-                    await asyncio.sleep(delay_sec)
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(
+                                self.cancel_event.wait(),
+                                budget_event.wait(),
+                                return_exceptions=True,
+                            ),
+                            timeout=delay_sec,
+                        )
+                        break
+                    except asyncio.TimeoutError:
+                        pass
 
         tasks = [asyncio.create_task(worker()) for _ in range(concurrency)]
         await asyncio.gather(*tasks, return_exceptions=True)
+
+        if budget_exhausted:
+            logger.info(
+                "Load resilience workload stopped cleanly: scan request budget limit reached (%d requests)",
+                getattr(getattr(self.http, "ledger", None), "max_requests", attempted),
+            )
 
         elapsed_total_ms = (time.monotonic() - start_time) * 1000.0
         dur_s = max(0.001, elapsed_total_ms / 1000.0)
@@ -106,6 +136,7 @@ class LoadResilienceModule:
             "http_other": http_other,
             "network_failed": network_failed,
             "aborted": 1 if self.cancel_event.is_set() else 0,
+            "budget_exhausted": 1 if budget_exhausted else 0,
             "rate_limited": rate_limited,
             "legacy_success_lt_500": legacy_success_lt_500,
             "legacy_failure": legacy_failure,
@@ -163,6 +194,27 @@ class LoadResilienceModule:
                     "elapsed_ms": elapsed_total_ms,
                 },
                 "fingerprint": f"stress:failure_rate_medium:{self.target_url}",
+            })
+        elif attempted > 0:
+            findings.append({
+                "module": "stress",
+                "check_id": "stress.bounded_load_test",
+                "category": "service_resilience",
+                "source_category": "STRESS_TEST",
+                "severity": "info",
+                "source_severity": "info",
+                "severity_reason": f"Target sustained bounded load with acceptable resilience ({legacy_fail_pct:.1f}% failure rate across {attempted} requests at {avg_rps:.1f} avg req/s)",
+                "confidence": "confirmed_configuration",
+                "title": "Bounded Load Resilience Benchmark: Target Stable",
+                "description": f"Target successfully sustained {attempted} requests ({http_2xx_3xx} 2xx/3xx, {http_4xx} 4xx) with {legacy_fail_pct:.1f}% failure rate at an average of {avg_rps:.1f} requests/sec.",
+                "remediation": "No remediation required. The target demonstrated acceptable resilience within the tested bounds.",
+                "evidence": {
+                    "url_display": self.target_url,
+                    "method": method,
+                    "excerpts": [{"kind": "text", "value_redacted": f"Failure rate: {legacy_fail_pct:.1f}%, Attempted: {attempted}, Avg RPS: {round(avg_rps, 1)}"}],
+                    "elapsed_ms": elapsed_total_ms,
+                },
+                "fingerprint": f"stress:resilience_stable:{self.target_url}",
             })
 
         return {
