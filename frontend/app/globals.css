@@ -5,15 +5,25 @@
   --color-surface: #111416;
   --color-surface-raised: #171b1d;
   --color-line: #2a3033;
-  --color-signal: #a8d94f;
-  --color-signal-dim: #7da835;
+  --color-instrument-mark: #78837f;
+  --color-signal-lime: #a8d94f;
+  --color-signal: var(--color-signal-lime); /* Alias kompatibilitas */
   --color-ink: #f2f4ef;
   --color-muted: #9aa3a0;
+  --color-status-warning: #e7ad52;
+  --color-status-error: #ed7c8d;
+  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
   --radius-panel: 1rem;
   --radius-control: 0.625rem;
 }
 
 :root {
+  --scan-motion-feedback: 140ms;
+  --scan-motion-position: 220ms;
+  --scan-sweep-period: 4s;
+  --scan-sweep-opacity: 0.06;
+  --scan-easing-feedback: cubic-bezier(0.2, 0, 0, 1);
   --canvas-bg: #090b0c;
   --surface-bg: #111416;
   --surface-raised: #171b1d;
@@ -64,7 +74,7 @@ body {
 }
 
 .animate-radar-sweep {
-  animation: radar-sweep 4s linear infinite;
+  animation: radar-sweep var(--scan-sweep-period, 4s) linear infinite;
   transform-origin: center center;
 }
 

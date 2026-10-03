@@ -1,0 +1,17 @@
+{
+  "name": "signal-scanner-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Signal Scanner - Multi-Mode WiFi, BLE, and SDR Signal Measurement System",
+  "scripts": {
+    "dev": "python run.py",
+    "dev:mock": "python run.py --mock",
+    "dev:ble": "python run.py --mode bluetooth",
+    "dev:radio": "python run.py --mode radio --mock",
+    "dev:web": "python run.py --no-collector",
+    "start": "python run.py",
+    "test": "pytest backend/tests collector/tests -v && pnpm --prefix frontend test",
+    "test:py": "pytest backend/tests collector/tests -v",
+    "test:fe": "pnpm --prefix frontend test"
+  }
+}

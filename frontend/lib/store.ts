@@ -39,6 +39,20 @@ interface ScannerStore {
   setTargets: (targets: TargetSummary[]) => void;
   upsertTarget: (target: TargetSummary) => void;
 
+  // Synchronized Filter & Presentation State (PRD v1.2.1)
+  searchQuery: string;
+  setSearchQuery: (query: string) => void;
+  viewMode: "ssid" | "bssid";
+  setViewMode: (viewMode: "ssid" | "bssid") => void;
+  showExpiredHistory: boolean;
+  setShowExpiredHistory: (show: boolean) => void;
+  filterBand: string | null;
+  setFilterBand: (band: string | null) => void;
+
+  // Scan Activity Watchdog (PRD 13.6)
+  lastActivityTimestamp: number;
+  recordScanActivity: () => void;
+
   // Real-time measurement cache & quality telemetry
   measurementsByTarget: Record<string, MeasurementEvent[]>;
   latestFftBins: number[];
@@ -126,6 +140,10 @@ export const useScannerStore = create<ScannerStore>((set, get) => ({
           droppedFrames: 0,
           latestQuality: null,
           latestTraceId: null,
+          searchQuery: "",
+          filterBand: null,
+          showExpiredHistory: false,
+          lastActivityTimestamp: 0,
         };
       }
       return { activeSession };
@@ -164,6 +182,20 @@ export const useScannerStore = create<ScannerStore>((set, get) => ({
       return { targets: [target, ...state.targets] };
     }),
 
+  // Synchronized Filter & Presentation State (PRD v1.2.1)
+  searchQuery: "",
+  setSearchQuery: (searchQuery) => set({ searchQuery }),
+  viewMode: "ssid",
+  setViewMode: (viewMode) => set({ viewMode }),
+  showExpiredHistory: false,
+  setShowExpiredHistory: (showExpiredHistory) => set({ showExpiredHistory }),
+  filterBand: null,
+  setFilterBand: (filterBand) => set({ filterBand }),
+
+  // Scan Activity Watchdog (PRD 13.6)
+  lastActivityTimestamp: 0,
+  recordScanActivity: () => set({ lastActivityTimestamp: Date.now() }),
+
   measurementsByTarget: {},
   latestFftBins: [],
   latestFftCenterFreq: 433920000,
@@ -198,10 +230,19 @@ export const useScannerStore = create<ScannerStore>((set, get) => ({
         // Update target summary
         const existing = targetMap.get(ev.target_id);
         const signalVal = ev.signal.smoothed_value ?? ev.signal.value;
+        const observedAt = ev.quality?.observed_at || ev.captured_at;
+        const outOfScale = signalVal < -100 ? "low" : signalVal > -30 ? "high" : null;
 
         if (existing) {
+          const prevSig = existing.latest_signal;
+          if (prevSig !== undefined && prevSig !== null && Number.isFinite(prevSig)) {
+            existing.previous_signal = prevSig;
+            existing.delta_signal = Math.round((signalVal - prevSig) * 10) / 10;
+          }
           existing.last_seen = ev.captured_at;
+          existing.observed_at = observedAt;
           existing.latest_signal = signalVal;
+          existing.out_of_scale = outOfScale;
           existing.sample_count += 1;
           existing.min_signal = Math.min(existing.min_signal, signalVal);
           existing.max_signal = Math.max(existing.max_signal, signalVal);
@@ -218,8 +259,12 @@ export const useScannerStore = create<ScannerStore>((set, get) => ({
             mode: ev.mode,
             first_seen: ev.captured_at,
             last_seen: ev.captured_at,
+            observed_at: observedAt,
             sample_count: 1,
             latest_signal: signalVal,
+            previous_signal: null,
+            delta_signal: null,
+            out_of_scale: outOfScale,
             unit: ev.signal.unit,
             min_signal: signalVal,
             max_signal: signalVal,
@@ -241,6 +286,7 @@ export const useScannerStore = create<ScannerStore>((set, get) => ({
         latestFftCenterFreq: newCenterFreq,
         latestQuality: latestQ,
         latestTraceId: envelopeMeta?.trace_id || state.latestTraceId,
+        lastActivityTimestamp: Date.now(),
         targets: Array.from(targetMap.values()).sort(
           (a, b) => b.latest_signal - a.latest_signal
         ),
@@ -333,5 +379,9 @@ export const useScannerStore = create<ScannerStore>((set, get) => ({
       latestRecommendation: null,
       evidenceDrawerOpen: false,
       selectedEvidenceChannel: null,
+      searchQuery: "",
+      filterBand: null,
+      showExpiredHistory: false,
+      lastActivityTimestamp: 0,
     }),
 }));

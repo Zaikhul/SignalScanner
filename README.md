@@ -63,32 +63,78 @@ signal-scanner/
 
 ## ⚡ Panduan Menjalankan Aplikasi
 
-### 1. Menjalankan Backend (FastAPI)
+### 🚀 Cara Menjalankan Dalam "Satu Pintu" (Rekomendasi Utama)
+
+Anda dapat menjalankan seluruh subsistem (**Backend**, **Frontend**, dan **Collector**) sekaligus hanya dengan **satu perintah**:
+
+#### Opsi A: Runner Lokal Windows (Paling Direkomendasikan untuk Hardware Scan)
+Mendukung akses penuh ke adapter WiFi native Windows, Bluetooth LE (`Bleak`), dan USB SDR dongle:
 
 ```pwsh
-# 1. Masuk ke direktori root / backend
-cd backend
+# Cara 1 (Python)
+python run.py
 
-# 2. Jalankan server FastAPI (port 8000)
-uvicorn app.main:app --reload --port 8000
+# Atau Cara 2 (PowerShell Script)
+.\run.ps1
+
+# Atau Cara 3 (One-Click Windows Batch / Double-click di File Explorer)
+run.bat
+
+# Atau Cara 4 (via pnpm/npm dari root)
+pnpm dev
+```
+
+> **Catatan Fitur Runner**:
+> - **Dependency-Aware**: Menunggu database & backend sehat (`/healthz`) sebelum mengaktifkan collector dan frontend.
+> - **Auto Browser**: Otomatis membuka `http://localhost:3000` ketika frontend telah siap.
+> - **Unified Clean Teardown**: Menekan `Ctrl+C` akan mematikan seluruh proses anak (*process tree*) di Windows tanpa meninggalkan proses zombie yang mengunci port `8000` atau `3000`.
+
+**Opsi Argumen Tambahan:**
+```pwsh
+# Mode Simulasi Virtual (tanpa adapter hardware fisik)
+python run.py --mock
+
+# Mode Bluetooth LE
+python run.py --mode bluetooth
+
+# Mode Radio Spektrum (SDR)
+python run.py --mode radio --mock
+
+# Mode Backend + Frontend saja (tanpa collector)
+python run.py --no-collector
+
+# Membuka terminal terpisah (3 split-panes di Windows Terminal wt.exe)
+.\launch-split.ps1
+```
+
+#### Opsi B: Kontainerisasi Lengkap (Docker Compose)
+Menjalankan TimescaleDB, Redis, Backend, Frontend, dan Collector Mock secara terisolasi:
+
+```pwsh
+docker compose up --build
+```
+Akses web UI pada `http://localhost:3000` dan REST API pada `http://localhost:8000`.
+
+---
+
+### 🛠️ Cara Menjalankan Manual (Per Modul)
+
+Jika ingin menjalankan atau men-debug modul tertentu secara terpisah:
+
+#### 1. Menjalankan Backend (FastAPI)
+```pwsh
+uvicorn app.main:app --app-dir backend --reload --port 8000
 ```
 Backend akan otomatis menginisialisasi database lokal SQLite (`signal_scanner.db`) dan siap menerima koneksi REST serta WebSocket.
 
-### 2. Menjalankan Frontend (Next.js 15)
-
+#### 2. Menjalankan Frontend (Next.js 15)
 ```pwsh
-# 1. Masuk ke direktori frontend
 cd frontend
-
-# 2. Jalankan development server (port 3000)
 pnpm dev
 ```
 Buka browser pada `http://localhost:3000`.
 
-### 3. Menjalankan Collector Daemon (Opsional / Hardware Scan)
-
-Collector dapat dijalankan secara terpisah untuk memindai adapter lokal pada host:
-
+#### 3. Menjalankan Collector Daemon
 ```pwsh
 # Mode WiFi (Adapter Windows / Mock)
 python -m collector.app.main --mode wifi

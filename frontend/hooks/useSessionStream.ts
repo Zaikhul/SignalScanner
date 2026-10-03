@@ -22,6 +22,7 @@ export function useSessionStream(sessionId?: string | null) {
     updateAssociationState,
     upsertLanHost,
     setAdapterConflictNotice,
+    recordScanActivity,
   } = useScannerStore();
 
   useEffect(() => {
@@ -84,6 +85,7 @@ export function useSessionStream(sessionId?: string | null) {
               break;
 
             case "measurement.batch":
+              recordScanActivity();
               if (msg.data && Array.isArray(msg.data)) {
                 const seqTo = msg.sequence_to || (lastSequenceRef.current + 1);
                 // Detect gap

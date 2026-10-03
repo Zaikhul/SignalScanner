@@ -3,12 +3,12 @@ version: "3.8"
 services:
   timescaledb:
     image: timescale/timescaledb:latest-pg16
-    container_name: signal_scanner_db
+    container_name: SignalScannerDB
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgrespassword
-      POSTGRES_DB: signal_scanner
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: SignalScanner
     ports:
       - "5432:5432"
     volumes:
@@ -21,7 +21,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: signal_scanner_redis
+    container_name: SignalScannerRedis
     restart: unless-stopped
     ports:
       - "6379:6379"
@@ -37,26 +37,45 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: signal_scanner_backend
+    container_name: BE_SignalScanner
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgrespassword@timescaledb:5432/signal_scanner
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@timescaledb:5432/SignalScanner
       STREAM_BACKEND: redis
       REDIS_URL: redis://redis:6379/0
       ALLOWED_ORIGINS: '["http://localhost:3000", "http://127.0.0.1:3000"]'
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     depends_on:
       timescaledb:
         condition: service_healthy
       redis:
         condition: service_healthy
 
+  collector:
+    build:
+      context: ./collector
+      dockerfile: Dockerfile
+    container_name: Collector_SignalScanner
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "8001:8001"
+    depends_on:
+      backend:
+        condition: service_healthy
+
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: signal_scanner_frontend
+    container_name: FE_SignalScanner
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000

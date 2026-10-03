@@ -93,3 +93,6 @@ logs/
 *.log
 *.tmp
 *.bak
+
+*.bat
+*.ps1

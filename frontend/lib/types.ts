@@ -116,8 +116,11 @@ export interface TargetSummary {
   mode: ScanMode;
   first_seen: string;
   last_seen: string;
+  observed_at?: string | null;
   sample_count: number;
   latest_signal: number;
+  previous_signal?: number | null;
+  delta_signal?: number | null; // Delta in dB from previous observation
   unit: string;
   min_signal: number;
   max_signal: number;
@@ -126,9 +129,13 @@ export interface TargetSummary {
   channel?: number | null;
   band?: string | null;
   freshness?: FreshnessState;
+  computed_freshness?: FreshnessState;
   source_method?: SourceMethod;
   is_pinned: boolean;
   is_stale?: boolean;
+  is_expired?: boolean;
+  out_of_scale?: "low" | "high" | null;
+  reason_unplottable?: string | null;
   children_bssids?: TargetSummary[];
   extra?: Record<string, any> | null;
 }

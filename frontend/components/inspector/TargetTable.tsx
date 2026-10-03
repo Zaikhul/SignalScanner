@@ -1,57 +1,82 @@
 "use client";
 
 import React, { useState, useMemo, useEffect } from "react";
-import { MagnifyingGlass, PushPin, WifiHigh, Bluetooth, Radio, CaretDown, CaretRight, WarningOctagon, Stack } from "@phosphor-icons/react";
+import {
+  MagnifyingGlass,
+  PushPin,
+  CaretDown,
+  CaretRight,
+  WarningOctagon,
+  Clock,
+  Question,
+} from "@phosphor-icons/react";
 import { useScannerStore } from "@/lib/store";
 import { apiClient } from "@/lib/apiClient";
 import { TargetSummary } from "@/lib/types";
+import { evaluateTargetFreshness } from "@/lib/scanfieldMath";
 
 export function TargetTable() {
-  const { targets, selectedTargetId, setSelectedTargetId, activeSession, setTargets } = useScannerStore();
-  const [search, setSearch] = useState("");
-  const [viewMode, setViewMode] = useState<"ssid" | "bssid">("ssid");
-  const [showStale, setShowStale] = useState(false);
+  const {
+    targets,
+    selectedTargetId,
+    setSelectedTargetId,
+    activeSession,
+    setTargets,
+    mode,
+    searchQuery,
+    setSearchQuery,
+    viewMode,
+    setViewMode,
+    showExpiredHistory,
+    setShowExpiredHistory,
+  } = useScannerStore();
+
   const [expandedSsid, setExpandedSsid] = useState<Record<string, boolean>>({});
   const [now, setNow] = useState(Date.now());
 
-  // Tick clock every 5 seconds for stale/decay calculation
+  // Tick clock every 2 seconds for freshness update
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 5000);
+    const timer = setInterval(() => setNow(Date.now()), 2000);
     return () => clearInterval(timer);
   }, []);
 
-  // Filter and compute stale/decay status
+  // Filter and compute unified freshness status
   const processedTargets = useMemo(() => {
     return targets
       .map((t) => {
-        const lastSeenMs = new Date(t.last_seen).getTime();
-        const ageMs = now - lastSeenMs;
-        const isStale = ageMs > 30000; // > 30 seconds
-        const isExpired = ageMs > 60000; // > 60 seconds TTL
+        const { freshness, isStale, isExpired, ageSeconds } = evaluateTargetFreshness(t, now, mode);
         return {
           ...t,
+          computed_freshness: freshness,
           is_stale: isStale,
           is_expired: isExpired,
+          age_seconds: ageSeconds,
         };
       })
       .filter((t) => {
-        // Exclude expired from live view unless showStale is enabled
-        if (!showStale && t.is_expired) return false;
+        // Exclude expired from live view unless showExpiredHistory is enabled
+        if (!showExpiredHistory && t.is_expired) return false;
 
-        const term = search.toLowerCase();
+        const term = searchQuery.trim().toLowerCase();
+        if (!term) return true;
+
         return (
           (t.display_name && t.display_name.toLowerCase().includes(term)) ||
           t.target_id.toLowerCase().includes(term) ||
-          (t.channel && t.channel.toString().includes(term))
+          (t.channel && t.channel.toString().includes(term)) ||
+          (t.band && t.band.toLowerCase().includes(term))
         );
       });
-  }, [targets, search, showStale, now]);
+  }, [targets, searchQuery, showExpiredHistory, now, mode]);
 
   // Group by SSID when viewMode === 'ssid'
   const groupedSsidList = useMemo(() => {
     if (viewMode === "bssid") return [];
 
-    const map = new Map<string, { groupKey: string; ssid: string; targets: typeof processedTargets }>();
+    const map = new Map<
+      string,
+      { groupKey: string; ssid: string; targets: typeof processedTargets }
+    >();
 
     for (const t of processedTargets) {
       const isHidden = !t.display_name || t.display_name.toLowerCase().includes("hidden");
@@ -101,13 +126,13 @@ export function TargetTable() {
       <div className="space-y-2">
         <div className="flex items-center justify-between gap-2">
           {/* View Mode Toggle */}
-          <div className="inline-flex rounded-[var(--radius-control)] bg-zinc-950 p-0.5 border border-white/10 text-xs">
+          <div className="inline-flex rounded-[var(--radius-control)] bg-[var(--color-canvas)] p-0.5 border border-[var(--color-line)] text-xs">
             <button
               type="button"
               onClick={() => setViewMode("ssid")}
               className={`px-2.5 py-1 rounded-[calc(var(--radius-control)-2px)] font-medium transition cursor-pointer ${
                 viewMode === "ssid"
-                  ? "bg-[var(--color-surface-raised)] text-[var(--color-signal)] shadow"
+                  ? "bg-[var(--color-surface-raised)] text-[var(--color-signal-lime)]"
                   : "text-zinc-400 hover:text-zinc-200"
               }`}
             >
@@ -118,7 +143,7 @@ export function TargetTable() {
               onClick={() => setViewMode("bssid")}
               className={`px-2.5 py-1 rounded-[calc(var(--radius-control)-2px)] font-medium transition cursor-pointer ${
                 viewMode === "bssid"
-                  ? "bg-[var(--color-surface-raised)] text-[var(--color-signal)] shadow"
+                  ? "bg-[var(--color-surface-raised)] text-[var(--color-signal-lime)]"
                   : "text-zinc-400 hover:text-zinc-200"
               }`}
             >
@@ -126,37 +151,49 @@ export function TargetTable() {
             </button>
           </div>
 
-          {/* Stale Filter Toggle */}
-          <label className="text-[11px] text-zinc-500 flex items-center gap-1.5 cursor-pointer">
+          {/* Stale/History Filter Toggle */}
+          <label className="text-[11px] text-zinc-400 flex items-center gap-1.5 cursor-pointer select-none">
             <input
               type="checkbox"
-              checked={showStale}
-              onChange={(e) => setShowStale(e.target.checked)}
-              className="accent-[var(--color-signal)] rounded"
+              checked={showExpiredHistory}
+              onChange={(e) => setShowExpiredHistory(e.target.checked)}
+              className="accent-[var(--color-signal-lime)] rounded"
             />
-            <span>Tampilkan Riwayat (&gt;60s)</span>
+            <span>Tampilkan Riwayat</span>
           </label>
         </div>
 
         {/* Search Input */}
         <div className="relative">
-          <MagnifyingGlass size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+          <MagnifyingGlass
+            size={14}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"
+          />
           <input
             type="text"
             placeholder="Cari SSID, device name, kanal, atau ID..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full bg-[var(--color-surface)] border border-white/10 rounded-[var(--radius-control)] pl-8 pr-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-[var(--color-signal)]"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full bg-[var(--color-surface)] border border-[var(--color-line)] rounded-[var(--radius-control)] pl-8 pr-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-[var(--color-signal-lime)]"
           />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery("")}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-zinc-500 hover:text-zinc-300 font-mono"
+            >
+              Hapus
+            </button>
+          )}
         </div>
       </div>
 
       {/* Target List Rendering */}
-      <div className="space-y-1.5 max-h-[380px] overflow-y-auto pr-1">
+      <div className="space-y-1.5 max-h-[380px] overflow-y-auto pr-1" role="list">
         {viewMode === "ssid" ? (
           // --- MODE PER SSID (GROUPED NETWORK VIEW) ---
           groupedSsidList.length === 0 ? (
-            <div className="text-center py-8 text-xs text-zinc-500">
+            <div className="text-center py-8 text-xs text-zinc-500 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-[var(--radius-panel)]">
               {targets.length === 0 ? "Belum ada target terdeteksi..." : "Tidak ada hasil pencarian"}
             </div>
           ) : (
@@ -171,8 +208,8 @@ export function TargetTable() {
               return (
                 <div
                   key={group.groupKey}
-                  className={`rounded-[var(--radius-control)] border border-white/10 bg-[var(--color-surface)] overflow-hidden transition ${
-                    allStale ? "opacity-60" : "opacity-100"
+                  className={`rounded-[var(--radius-control)] border border-[var(--color-line)] bg-[var(--color-surface)] overflow-hidden transition ${
+                    allStale ? "opacity-75" : "opacity-100"
                   }`}
                 >
                   {/* Parent SSID Header */}
@@ -184,7 +221,19 @@ export function TargetTable() {
                         setSelectedTargetId(bestTarget.target_id);
                       }
                     }}
-                    className="p-2.5 flex items-center justify-between gap-3 hover:bg-white/5 cursor-pointer"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        if (bssidCount > 1) {
+                          toggleExpand(group.groupKey);
+                        } else {
+                          setSelectedTargetId(bestTarget.target_id);
+                        }
+                      }
+                    }}
+                    tabIndex={0}
+                    role="button"
+                    className="p-2.5 flex items-center justify-between gap-3 hover:bg-[var(--color-surface-raised)] cursor-pointer focus:outline-none focus:ring-1 focus:ring-[var(--color-signal-lime)]"
                   >
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
@@ -206,13 +255,13 @@ export function TargetTable() {
                         </span>
 
                         {bssidCount > 1 && (
-                          <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-zinc-800 text-zinc-400">
+                          <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-[var(--color-canvas)] text-zinc-400 border border-[var(--color-line)]">
                             {bssidCount} BSSID
                           </span>
                         )}
 
                         {allStale && (
-                          <span className="inline-flex items-center gap-1 text-[10px] text-amber-400 font-mono">
+                          <span className="inline-flex items-center gap-1 text-[10px] text-[var(--color-status-warning)] font-mono">
                             <WarningOctagon size={11} />
                             Stale
                           </span>
@@ -234,9 +283,9 @@ export function TargetTable() {
                         <span className="font-mono text-xs font-semibold tabular-nums text-zinc-100 block">
                           {maxRssi} <span className="text-[9px] text-zinc-500">{bestTarget.unit}</span>
                         </span>
-                        <div className="w-14 h-1.5 bg-zinc-800 rounded-full overflow-hidden mt-1 ml-auto">
+                        <div className="w-14 h-1.5 bg-[var(--color-canvas)] border border-[var(--color-line)] rounded-full overflow-hidden mt-1 ml-auto">
                           <div
-                            className="h-full bg-[var(--color-signal)] rounded-full transition-all"
+                            className="h-full bg-[var(--color-signal-lime)] rounded-full transition-all"
                             style={{ width: `${Math.round(norm * 100)}%` }}
                           />
                         </div>
@@ -244,11 +293,10 @@ export function TargetTable() {
                     </div>
                   </div>
 
-                  {/* Child BSSID Entries (when expanded or single) */}
+                  {/* Child BSSID Entries (when expanded) */}
                   {isExpanded && bssidCount > 1 && (
-                    <div className="bg-zinc-950/60 border-t border-white/5 p-2 space-y-1.5">
+                    <div className="bg-[var(--color-canvas)] border-t border-[var(--color-line)] p-2 space-y-1.5">
                       {group.targets.map((child) => {
-                        const childNorm = Math.max(0, Math.min(1, (child.latest_signal + 100) / 70));
                         const isSelected = child.target_id === selectedTargetId;
 
                         return (
@@ -258,21 +306,50 @@ export function TargetTable() {
                               e.stopPropagation();
                               setSelectedTargetId(child.target_id);
                             }}
-                            className={`p-2 rounded-[calc(var(--radius-control)-2px)] border text-xs flex items-center justify-between gap-2 cursor-pointer transition ${
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setSelectedTargetId(child.target_id);
+                              }
+                            }}
+                            tabIndex={0}
+                            role="button"
+                            className={`p-2 rounded-[calc(var(--radius-control)-2px)] border text-xs flex items-center justify-between gap-2 cursor-pointer transition focus:outline-none focus:ring-1 focus:ring-[var(--color-signal-lime)] ${
                               isSelected
-                                ? "bg-[var(--color-surface-raised)] border-[var(--color-signal)] text-zinc-100"
-                                : "border-white/5 hover:bg-white/5 text-zinc-400"
+                                ? "bg-[var(--color-surface-raised)] border-[var(--color-signal-lime)] text-zinc-100"
+                                : "border-[var(--color-line)] hover:bg-[var(--color-surface)] text-zinc-400"
                             }`}
                           >
-                            <div className="truncate">
+                            <div className="truncate flex items-center gap-1.5">
+                              {child.is_pinned && (
+                                <PushPin
+                                  size={11}
+                                  weight="fill"
+                                  className="text-[var(--color-signal-lime)] shrink-0"
+                                />
+                              )}
                               <span className="font-mono text-[11px] text-zinc-300">
                                 {child.target_id}
                               </span>
-                              <span className="text-[10px] text-zinc-500 ml-2">
-                                {child.band} • Kanal {child.channel || "-"}
+                              <span className="text-[10px] text-zinc-500 ml-1">
+                                {child.band} • Ch {child.channel || "-"}
                               </span>
                             </div>
-                            <div className="flex items-center gap-2 font-mono text-xs tabular-nums text-zinc-200">
+                            <div className="flex items-center gap-2 font-mono text-xs tabular-nums text-zinc-200 shrink-0">
+                              {child.delta_signal !== undefined && child.delta_signal !== null && (
+                                <span
+                                  className={`text-[10px] ${
+                                    child.delta_signal > 0
+                                      ? "text-[var(--color-signal-lime)]"
+                                      : child.delta_signal < 0
+                                      ? "text-[var(--color-status-error)]"
+                                      : "text-zinc-500"
+                                  }`}
+                                >
+                                  {child.delta_signal > 0 ? `+${child.delta_signal}` : child.delta_signal} dB
+                                </span>
+                              )}
                               <span>{child.latest_signal} dBm</span>
                             </div>
                           </div>
@@ -287,7 +364,7 @@ export function TargetTable() {
         ) : (
           // --- MODE PER BSSID (GRANULAR EMITTER VIEW) ---
           processedTargets.length === 0 ? (
-            <div className="text-center py-8 text-xs text-zinc-500">
+            <div className="text-center py-8 text-xs text-zinc-500 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-[var(--radius-panel)]">
               {targets.length === 0 ? "Belum ada target terdeteksi..." : "Tidak ada hasil pencarian"}
             </div>
           ) : (
@@ -299,12 +376,20 @@ export function TargetTable() {
                 <div
                   key={t.target_id}
                   onClick={() => setSelectedTargetId(t.target_id)}
-                  className={`p-2.5 rounded-[var(--radius-control)] border transition cursor-pointer flex items-center justify-between gap-3 ${
-                    t.is_stale ? "opacity-60" : "opacity-100"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setSelectedTargetId(t.target_id);
+                    }
+                  }}
+                  tabIndex={0}
+                  role="button"
+                  className={`p-2.5 rounded-[var(--radius-control)] border transition cursor-pointer flex items-center justify-between gap-3 focus:outline-none focus:ring-1 focus:ring-[var(--color-signal-lime)] ${
+                    t.is_stale ? "opacity-75" : "opacity-100"
                   } ${
                     isSelected
-                      ? "bg-[var(--color-surface-raised)] border-[var(--color-signal)] text-zinc-100 shadow-[0_0_12px_rgba(168,217,79,0.06)]"
-                      : "bg-[var(--color-surface)] border-white/10 text-zinc-400 hover:text-zinc-200 hover:bg-white/5"
+                      ? "bg-[var(--color-surface-raised)] border-[var(--color-signal-lime)] text-zinc-100"
+                      : "bg-[var(--color-surface)] border-[var(--color-line)] text-zinc-400 hover:text-zinc-200 hover:bg-[var(--color-surface-raised)]"
                   }`}
                 >
                   <div className="flex-1 min-w-0">
@@ -313,12 +398,28 @@ export function TargetTable() {
                         {t.display_name || "Hidden Emitter"}
                       </span>
                       {t.is_pinned && (
-                        <PushPin size={12} weight="fill" className="text-[var(--color-signal)] shrink-0" />
+                        <PushPin
+                          size={12}
+                          weight="fill"
+                          className="text-[var(--color-signal-lime)] shrink-0"
+                        />
                       )}
-                      {t.is_stale && (
-                        <span className="inline-flex items-center gap-1 text-[10px] text-amber-400 font-mono">
+                      {t.computed_freshness === "stale" && (
+                        <span className="inline-flex items-center gap-1 text-[10px] text-[var(--color-status-warning)] font-mono">
                           <WarningOctagon size={11} />
                           Stale
+                        </span>
+                      )}
+                      {t.computed_freshness === "expired" && (
+                        <span className="inline-flex items-center gap-1 text-[10px] text-zinc-500 font-mono">
+                          <Clock size={11} />
+                          Riwayat
+                        </span>
+                      )}
+                      {t.computed_freshness === "unknown" && (
+                        <span className="inline-flex items-center gap-1 text-[10px] text-zinc-500 font-mono">
+                          <Question size={11} />
+                          Unknown
                         </span>
                       )}
                     </div>
@@ -333,12 +434,28 @@ export function TargetTable() {
                   {/* RSSI Signal Bar & Value */}
                   <div className="flex items-center gap-2 text-right shrink-0">
                     <div>
-                      <span className="font-mono text-xs font-semibold tabular-nums text-zinc-100 block">
-                        {t.latest_signal} <span className="text-[9px] text-zinc-500">{t.unit}</span>
-                      </span>
-                      <div className="w-16 h-1.5 bg-zinc-800 rounded-full overflow-hidden mt-1 ml-auto">
+                      <div className="flex items-center justify-end gap-1.5 font-mono text-xs font-semibold tabular-nums text-zinc-100">
+                        {t.delta_signal !== undefined && t.delta_signal !== null && (
+                          <span
+                            className={`text-[10px] ${
+                              t.delta_signal > 0
+                                ? "text-[var(--color-signal-lime)]"
+                                : t.delta_signal < 0
+                                ? "text-[var(--color-status-error)]"
+                                : "text-zinc-500"
+                            }`}
+                          >
+                            {t.delta_signal > 0 ? `+${t.delta_signal}` : t.delta_signal}
+                          </span>
+                        )}
+                        <span>
+                          {t.latest_signal}{" "}
+                          <span className="text-[9px] text-zinc-500 font-normal">{t.unit}</span>
+                        </span>
+                      </div>
+                      <div className="w-16 h-1.5 bg-[var(--color-canvas)] border border-[var(--color-line)] rounded-full overflow-hidden mt-1 ml-auto">
                         <div
-                          className="h-full bg-[var(--color-signal)] rounded-full transition-all"
+                          className="h-full bg-[var(--color-signal-lime)] rounded-full transition-all"
                           style={{ width: `${Math.round(norm * 100)}%` }}
                         />
                       </div>
