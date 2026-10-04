@@ -27,6 +27,10 @@ class Settings(BaseSettings):
         if self.ENVIRONMENT == "production":
             if "change-in-prod" in self.SECRET_KEY or self.TENANT_SALT == "tenant_default_salt_2026":
                 raise ValueError("Insecure default SECRET_KEY or TENANT_SALT detected in production mode!")
+            if not self.API_AUTH_TOKEN or self.API_AUTH_TOKEN == "signal-scanner-dev-token-2026":
+                raise ValueError("Insecure default or empty API_AUTH_TOKEN detected in production mode!")
+            if not self.COLLECTOR_API_KEY or self.COLLECTOR_API_KEY == "collector-dev-key-2026":
+                raise ValueError("Insecure default or empty COLLECTOR_API_KEY detected in production mode!")
 
     # Database: SQLite async by default for zero-friction local run, PostgreSQL+TimescaleDB in prod
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./signal_scanner.db")

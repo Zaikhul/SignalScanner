@@ -178,16 +178,18 @@ class ChannelHealthEngine:
         if band_targets and widths_present == 0:
             quality_flags.append("CHANNEL_WIDTH_UNKNOWN")
 
-        # Temporal instability analysis per channel from measurements
-        # Calculate standard deviation of RSSI per channel over the window, strictly matching target band
-        ch_measurements: Dict[int, List[float]] = {}
+        # Temporal instability analysis per channel from measurements (QA-13)
+        # Calculate standard deviation of RSSI per target on each channel over time
+        ch_target_measurements: Dict[int, Dict[str, List[float]]] = {}
         for m in measurements:
             m_band = m.get("band")
             if m_band and m_band != band:
                 continue
             ch = m.get("channel")
             if ch is not None:
-                ch_measurements.setdefault(ch, []).append(float(m.get("signal_value", -90.0)))
+                tgt_id = m.get("target_id") or "default_target"
+                val = float(m.get("signal_value", -90.0))
+                ch_target_measurements.setdefault(ch, {}).setdefault(tgt_id, []).append(val)
 
         channel_items: List[ChannelHealthItem] = []
 
@@ -281,15 +283,29 @@ class ChannelHealthEngine:
                 noise_prov = ComponentProvenance.UNAVAILABLE
                 noise_penalty = None
 
-            # Temporal instability
-            samples = ch_measurements.get(ch, [])
-            if len(samples) >= 3:
-                mean_rssi = sum(samples) / len(samples)
-                variance = sum((s - mean_rssi) ** 2 for s in samples) / len(samples)
-                std_dev = math.sqrt(variance)
+            # Temporal instability per target over time (QA-13)
+            tgt_samples_map = ch_target_measurements.get(ch, {})
+            target_std_devs: List[float] = []
+            total_temporal_samples = 0
+
+            for tgt_id, t_samples in tgt_samples_map.items():
+                total_temporal_samples += len(t_samples)
+                if len(t_samples) >= 2:
+                    mean_t = sum(t_samples) / len(t_samples)
+                    var_t = sum((s - mean_t) ** 2 for s in t_samples) / len(t_samples)
+                    target_std_devs.append(math.sqrt(var_t))
+
+            if target_std_devs:
+                # Average temporal standard deviation across targets on this channel
+                avg_std_dev = sum(target_std_devs) / len(target_std_devs)
                 # std_dev of 0 dB -> 0.0 penalty, std_dev >= 8 dB -> 1.0 penalty
-                instability_penalty = min(max(std_dev / 8.0, 0.0), 1.0)
+                instability_penalty = min(max(avg_std_dev / 8.0, 0.0), 1.0)
                 instability_val = round(instability_penalty, 2)
+                instability_prov = ComponentProvenance.DERIVED
+            elif total_temporal_samples >= 3:
+                # Target IDs not differentiated but multiple measurements exist
+                instability_penalty = 0.0
+                instability_val = 0.0
                 instability_prov = ComponentProvenance.DERIVED
             else:
                 # If sparse samples, use baseline derived from AP count and variance proxy
@@ -349,7 +365,7 @@ class ChannelHealthEngine:
                 temporal_instability=ChannelHealthComponentValue(
                     value=instability_val,
                     provenance=instability_prov,
-                    details={"sample_count": len(samples)},
+                    details={"sample_count": total_temporal_samples},
                 ),
             )
 

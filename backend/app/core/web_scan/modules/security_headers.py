@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 from urllib.parse import urlsplit
 
 from app.core.web_scan.http_client import WebScanResponse
+from app.core.web_scan.network_policy import redact_url_query_params
 
 
 class SecurityHeadersModule:
@@ -21,6 +22,7 @@ class SecurityHeadersModule:
         findings = []
         observations = []
         headers = {k.lower(): v for k, v in self.response.headers.items()}
+        url_display = redact_url_query_params(self.response.url)
 
         # ── 1. Content-Security-Policy (CSP) ──────────────────────────────
         csp = headers.get("content-security-policy")
@@ -37,7 +39,7 @@ class SecurityHeadersModule:
                 "description": "CSP restricts resource loading and significantly mitigates Cross-Site Scripting (XSS) attacks.",
                 "remediation": "Configure a restrictive Content-Security-Policy (e.g., default-src 'self').",
                 "evidence": {
-                    "url_display": self.response.url,
+                    "url_display": url_display,
                     "status_code": self.response.status_code,
                     "header_names": list(self.response.headers.keys()),
                     "excerpts": [{"kind": "header", "value_redacted": "Content-Security-Policy: <missing>"}],
@@ -58,7 +60,7 @@ class SecurityHeadersModule:
                     "description": "Allowing unsafe-inline or unsafe-eval weakens XSS mitigations.",
                     "remediation": "Use nonces or hashes instead of 'unsafe-inline' and eliminate 'unsafe-eval'.",
                     "evidence": {
-                        "url_display": self.response.url,
+                        "url_display": url_display,
                         "status_code": self.response.status_code,
                         "header_names": list(self.response.headers.keys()),
                         "excerpts": [{"kind": "header", "value_redacted": f"Content-Security-Policy: {csp}"}],
@@ -82,7 +84,7 @@ class SecurityHeadersModule:
                     "description": "HSTS instructs browsers to only connect over secure HTTPS, protecting against SSL stripping.",
                     "remediation": "Add 'Strict-Transport-Security: max-age=31536000; includeSubDomains'.",
                     "evidence": {
-                        "url_display": self.response.url,
+                        "url_display": url_display,
                         "status_code": self.response.status_code,
                         "header_names": list(self.response.headers.keys()),
                         "excerpts": [{"kind": "header", "value_redacted": "Strict-Transport-Security: <missing>"}],
@@ -105,7 +107,7 @@ class SecurityHeadersModule:
                         "description": f"HSTS header '{hsts}' does not specify a valid numeric max-age.",
                         "remediation": "Specify a valid numeric max-age (e.g., max-age=31536000).",
                         "evidence": {
-                            "url_display": self.response.url,
+                            "url_display": url_display,
                             "status_code": self.response.status_code,
                             "header_names": list(self.response.headers.keys()),
                             "excerpts": [{"kind": "header", "value_redacted": f"Strict-Transport-Security: {hsts}"}],
@@ -127,7 +129,7 @@ class SecurityHeadersModule:
                             "description": "HSTS duration should be at least 31536000 seconds (1 year) for optimal protection.",
                             "remediation": "Increase max-age to 31536000 or greater.",
                             "evidence": {
-                                "url_display": self.response.url,
+                                "url_display": url_display,
                                 "status_code": self.response.status_code,
                                 "header_names": list(self.response.headers.keys()),
                                 "excerpts": [{"kind": "header", "value_redacted": f"Strict-Transport-Security: {hsts}"}],
@@ -147,7 +149,7 @@ class SecurityHeadersModule:
                             "description": "Without includeSubDomains, subdomains remain vulnerable to SSL stripping attacks.",
                             "remediation": "Add 'includeSubDomains' to the Strict-Transport-Security header.",
                             "evidence": {
-                                "url_display": self.response.url,
+                                "url_display": url_display,
                                 "status_code": self.response.status_code,
                                 "header_names": list(self.response.headers.keys()),
                                 "excerpts": [{"kind": "header", "value_redacted": f"Strict-Transport-Security: {hsts}"}],
@@ -171,7 +173,7 @@ class SecurityHeadersModule:
                 "description": "X-Frame-Options prevents the website from being embedded in an iframe, mitigating clickjacking.",
                 "remediation": "Set 'X-Frame-Options: DENY' or 'X-Frame-Options: SAMEORIGIN'.",
                 "evidence": {
-                    "url_display": self.response.url,
+                    "url_display": url_display,
                     "status_code": self.response.status_code,
                     "header_names": list(self.response.headers.keys()),
                     "excerpts": [{"kind": "header", "value_redacted": "X-Frame-Options: <missing>"}],
@@ -191,7 +193,7 @@ class SecurityHeadersModule:
                 "description": "Deprecated or non-standard values like ALLOW-FROM are not supported in modern browsers.",
                 "remediation": "Change X-Frame-Options value to DENY or SAMEORIGIN.",
                 "evidence": {
-                    "url_display": self.response.url,
+                    "url_display": url_display,
                     "status_code": self.response.status_code,
                     "header_names": list(self.response.headers.keys()),
                     "excerpts": [{"kind": "header", "value_redacted": f"X-Frame-Options: {xfo}"}],
@@ -214,7 +216,7 @@ class SecurityHeadersModule:
                 "description": "Prevents browsers from MIME-sniffing a response away from the declared content-type.",
                 "remediation": "Set 'X-Content-Type-Options: nosniff'.",
                 "evidence": {
-                    "url_display": self.response.url,
+                    "url_display": url_display,
                     "status_code": self.response.status_code,
                     "header_names": list(self.response.headers.keys()),
                     "excerpts": [{"kind": "header", "value_redacted": "X-Content-Type-Options: <missing>"}],
@@ -234,7 +236,7 @@ class SecurityHeadersModule:
                 "description": "Only 'nosniff' is a valid recognized value for X-Content-Type-Options.",
                 "remediation": "Set 'X-Content-Type-Options: nosniff'.",
                 "evidence": {
-                    "url_display": self.response.url,
+                    "url_display": url_display,
                     "status_code": self.response.status_code,
                     "header_names": list(self.response.headers.keys()),
                     "excerpts": [{"kind": "header", "value_redacted": f"X-Content-Type-Options: {xcto}"}],
@@ -257,7 +259,7 @@ class SecurityHeadersModule:
                 "description": "Permissions-Policy restricts access to browser features (camera, microphone, geolocation).",
                 "remediation": "Configure Permissions-Policy (e.g., 'geolocation=(), camera=(), microphone=()').",
                 "evidence": {
-                    "url_display": self.response.url,
+                    "url_display": url_display,
                     "status_code": self.response.status_code,
                     "header_names": list(self.response.headers.keys()),
                     "excerpts": [{"kind": "header", "value_redacted": "Permissions-Policy: <missing>"}],
@@ -280,7 +282,7 @@ class SecurityHeadersModule:
                 "description": "Referrer-Policy governs how much referrer information is sent along with requests.",
                 "remediation": "Set 'Referrer-Policy: strict-origin-when-cross-origin' or 'no-referrer'.",
                 "evidence": {
-                    "url_display": self.response.url,
+                    "url_display": url_display,
                     "status_code": self.response.status_code,
                     "header_names": list(self.response.headers.keys()),
                     "excerpts": [{"kind": "header", "value_redacted": "Referrer-Policy: <missing>"}],

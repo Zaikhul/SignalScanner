@@ -55,6 +55,7 @@ class CollectorDaemon:
         self._scan_task: Optional[asyncio.Task] = None
         self._assoc_task: Optional[asyncio.Task] = None
         self._local_server_task: Optional[asyncio.Task] = None
+        self._session_sequences: Dict[str, int] = {}
 
     def _headers(self) -> Dict[str, str]:
         return {"X-Collector-Key": collector_settings.COLLECTOR_API_KEY}
@@ -307,14 +308,18 @@ class CollectorDaemon:
 
         radio_cfg = (parameters or {}).get("radio_config") or {}
         dur_sec = duration_seconds or (parameters or {}).get("duration_seconds")
+        current_seq = self._session_sequences.get(session_id, 0)
         config = ScanConfig(
             session_id=session_id,
             sample_interval_ms=sample_interval_ms,
             duration_seconds=dur_sec,
+            initial_sequence=current_seq,
+            source_type=(parameters or {}).get("source_type") or "collector",
             center_frequency_hz=(parameters or {}).get("frequency_hz") or radio_cfg.get("center_frequency_hz", 433920000),
             span_hz=(parameters or {}).get("span_hz") or radio_cfg.get("span_hz", 2000000),
+            sample_rate_hz=(parameters or {}).get("sample_rate_hz") or radio_cfg.get("sample_rate_hz", 2048000),
             gain_db=(parameters or {}).get("gain_db") if "gain_db" in (parameters or {}) else radio_cfg.get("gain_db", 20.0),
-            fft_size=(parameters or {}).get("fft_size") or radio_cfg.get("fft_bins", 1024),
+            fft_size=(parameters or {}).get("fft_size") or radio_cfg.get("fft_size") or radio_cfg.get("fft_bins", 1024),
         )
 
         val_res = await adapter.validate(config)
@@ -329,7 +334,9 @@ class CollectorDaemon:
             async for batch in adapter.start(config):
                 if not self._running:
                     break
-                if dur_sec and (asyncio.get_event_loop().time() - start_mono) >= dur_sec:
+                seq_to = batch.get("sequence_to") or batch.get("sequence_from") or (self._session_sequences.get(session_id, 0) + 1)
+                self._session_sequences[session_id] = max(self._session_sequences.get(session_id, 0), seq_to)
+                if dur_sec is not None and (asyncio.get_event_loop().time() - start_mono) >= dur_sec:
                     logger.info(f"Scan duration of {dur_sec}s reached for session {session_id}")
                     break
                 # Coordinate with Radio Mutex: if association is ongoing, wait here
@@ -534,11 +541,26 @@ class CollectorDaemon:
             await self.disconnect_association(forget_profile=eff_forget, use_mock=self.use_mock)
             return {"status": "disconnected"}
 
+        @local_app.get("/healthz")
+        async def local_health_check():
+            return {
+                "status": "healthy",
+                "collector_id": collector_settings.COLLECTOR_ID,
+                "platform": collector_settings.PLATFORM,
+            }
+
         try:
-            config = uvicorn.Config(local_app, host="127.0.0.1", port=8001, log_level="warning")
+            config = uvicorn.Config(
+                local_app,
+                host=collector_settings.LOCAL_AGENT_HOST,
+                port=collector_settings.LOCAL_AGENT_PORT,
+                log_level="warning",
+            )
             server = uvicorn.Server(config)
             self._local_server_task = asyncio.create_task(server.serve())
-            logger.info("Collector Local Agent HTTP Server active on http://127.0.0.1:8001")
+            logger.info(
+                f"Collector Local Agent HTTP Server active on http://{collector_settings.LOCAL_AGENT_HOST}:{collector_settings.LOCAL_AGENT_PORT}"
+            )
         except Exception as e:
             logger.debug(f"Could not start local agent server: {e}")
 

@@ -51,6 +51,7 @@ class WebScanEngine:
         event_sink: Optional[Callable[[WebScanEvent], Awaitable[None]]] = None,
         initial_sequence: int = 1,
         global_semaphore: Optional[asyncio.Semaphore] = None,
+        scope_rules: Optional[List[Dict[str, Any]]] = None,
     ):
         self.scan_id = scan_id
         self.target_url = target_url
@@ -60,6 +61,7 @@ class WebScanEngine:
         self.event_sink = event_sink
         self.sequence = initial_sequence
         self.global_semaphore = global_semaphore
+        self.scope_rules = scope_rules
 
     async def _emit_event(self, event_type: str, payload: Any) -> None:
         """Helper to emit sequential scan events."""
@@ -127,6 +129,7 @@ class WebScanEngine:
             transport=self.transport,
             cancel_event=self.cancel_event,
             global_semaphore=self.global_semaphore,
+            scope_rules=self.scope_rules,
         )
 
         try:

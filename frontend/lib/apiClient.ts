@@ -11,6 +11,7 @@ import {
   ChannelHealthSnapshot,
   ChannelRecommendation,
   ChannelValidationRun,
+  SessionProvenanceManifest,
 } from "./types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
@@ -161,6 +162,62 @@ export const apiClient = {
 
   getDownloadUrl(exportId: string): string {
     return `${API_BASE}/api/v1/exports/${exportId}/download`;
+  },
+
+  async getSessionManifest(sessionId: string): Promise<SessionProvenanceManifest> {
+    return request<SessionProvenanceManifest>(`/api/v1/sessions/${sessionId}/manifest`);
+  },
+
+  async downloadExportFile(exportId: string): Promise<void> {
+    const url = `${API_BASE}/api/v1/exports/${exportId}/download`;
+    const headers: Record<string, string> = {};
+    if (API_AUTH_TOKEN) {
+      headers["Authorization"] = `Bearer ${API_AUTH_TOKEN}`;
+    }
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      throw new Error(`Export download failed with status ${res.status}`);
+    }
+    const disposition = res.headers.get("Content-Disposition");
+    let filename = `export_${exportId}.csv`;
+    if (disposition && disposition.includes("filename=")) {
+      filename = disposition.split("filename=")[1].replace(/["']/g, "").trim();
+    }
+    const blob = await res.blob();
+    const blobUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(blobUrl);
+    document.body.removeChild(a);
+  },
+
+  async downloadEvidenceBundle(sessionId: string): Promise<void> {
+    const url = `${API_BASE}/api/v1/sessions/${sessionId}/evidence-bundle`;
+    const headers: Record<string, string> = {};
+    if (API_AUTH_TOKEN) {
+      headers["Authorization"] = `Bearer ${API_AUTH_TOKEN}`;
+    }
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      throw new Error(`Evidence bundle download failed with status ${res.status}`);
+    }
+    const disposition = res.headers.get("Content-Disposition");
+    let filename = `evidence_bundle_${sessionId}.zip`;
+    if (disposition && disposition.includes("filename=")) {
+      filename = disposition.split("filename=")[1].replace(/["']/g, "").trim();
+    }
+    const blob = await res.blob();
+    const blobUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(blobUrl);
+    document.body.removeChild(a);
   },
 
   // WiFi Association & LAN Host Inventory (PRD v1.1)

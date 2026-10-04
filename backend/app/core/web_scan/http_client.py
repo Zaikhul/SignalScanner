@@ -263,6 +263,8 @@ class WebScanHttpClient:
             wait_time = next_allowed - now
 
         if wait_time > 0:
+            if self.job_deadline is not None and (now + wait_time) >= self.job_deadline:
+                return False
             if self.cancel_event:
                 try:
                     await asyncio.wait_for(self.cancel_event.wait(), timeout=wait_time)
@@ -271,6 +273,9 @@ class WebScanHttpClient:
                     pass
             else:
                 await asyncio.sleep(wait_time)
+
+        if self.job_deadline is not None and time.monotonic() >= self.job_deadline:
+            return False
 
         return not (self.cancel_event and self.cancel_event.is_set())
 
@@ -328,7 +333,7 @@ class WebScanHttpClient:
 
         while True:
             # 1. Deadline check
-            if self.job_deadline and time.monotonic() >= self.job_deadline:
+            if self.job_deadline is not None and time.monotonic() >= self.job_deadline:
                 safe_url = redact_url_query_params(current_url)
                 logger.warning("Job deadline reached before dispatching request to %s", safe_url)
                 self.recorded_errors.append({
@@ -383,7 +388,17 @@ class WebScanHttpClient:
             # 5. Origin rate limiting
             origin = self._get_origin_key(current_url)
             if not await self._schedule_rate_slot(origin):
-                self.ledger.record_failure("aborted")
+                if self.job_deadline is not None and time.monotonic() >= self.job_deadline:
+                    safe_url = redact_url_query_params(current_url)
+                    logger.warning("Job deadline reached for %s", safe_url)
+                    self.recorded_errors.append({
+                        "stage": "request",
+                        "code": "JOB_DEADLINE_EXCEEDED",
+                        "message": f"Job deadline reached for {safe_url}",
+                    })
+                    self.ledger.record_failure("timeout")
+                else:
+                    self.ledger.record_failure("aborted")
                 return None
 
             if origin not in self.origin_semaphores:
@@ -408,6 +423,21 @@ class WebScanHttpClient:
                         self.ledger.record_failure("aborted")
                         return None
 
+                    if self.job_deadline is not None and time.monotonic() >= self.job_deadline:
+                        safe_url = redact_url_query_params(current_url)
+                        logger.warning("Job deadline reached for %s", safe_url)
+                        self.recorded_errors.append({
+                            "stage": "request",
+                            "code": "JOB_DEADLINE_EXCEEDED",
+                            "message": f"Job deadline reached for {safe_url}",
+                        })
+                        self.ledger.record_failure("timeout")
+                        return None
+
+                    if self.job_deadline is not None:
+                        remaining_time = max(0.001, self.job_deadline - time.monotonic())
+                        req_timeout = min(req_timeout, remaining_time)
+
                     start_time = time.monotonic()
                     try:
                         req = self._client.build_request(
@@ -419,6 +449,10 @@ class WebScanHttpClient:
                             headers=req_headers,
                             timeout=req_timeout,
                         )
+                        if self.cancel_event and self.cancel_event.is_set():
+                            self.ledger.record_failure("aborted")
+                            return None
+
                         resp = await self._client.send(req, stream=True)
                         elapsed_ms = (time.monotonic() - start_time) * 1000.0
 
@@ -427,16 +461,23 @@ class WebScanHttpClient:
                         bytes_read = 0
                         truncated = False
 
-                        async for chunk in resp.aiter_bytes():
-                            if bytes_read + len(chunk) > max_bytes:
-                                allowed_slice = chunk[: max_bytes - bytes_read]
-                                body_chunks.append(allowed_slice)
-                                truncated = True
-                                break
-                            body_chunks.append(chunk)
-                            bytes_read += len(chunk)
-
-                        await resp.aclose()
+                        try:
+                            async for chunk in resp.aiter_bytes():
+                                if self.cancel_event and self.cancel_event.is_set():
+                                    self.ledger.record_failure("aborted")
+                                    return None
+                                if self.job_deadline is not None and time.monotonic() >= self.job_deadline:
+                                    self.ledger.record_failure("timeout")
+                                    return None
+                                if bytes_read + len(chunk) > max_bytes:
+                                    allowed_slice = chunk[: max_bytes - bytes_read]
+                                    body_chunks.append(allowed_slice)
+                                    truncated = True
+                                    break
+                                body_chunks.append(chunk)
+                                bytes_read += len(chunk)
+                        finally:
+                            await resp.aclose()
                         raw_body = b"".join(body_chunks)
                         encoding = resp.encoding or "utf-8"
                         try:
@@ -456,7 +497,8 @@ class WebScanHttpClient:
                         if resp.status_code in (301, 302, 303, 307, 308) and "location" in resp.headers:
                             if redirect_count < max_redirects:
                                 loc = resp.headers["location"]
-                                next_url = str(resp.url.join(loc))
+                                base_url = httpx.URL(current_url)
+                                next_url = str(base_url.join(loc))
                                 redirect_count += 1
                                 current_url = next_url
                                 if resp.status_code == 303:

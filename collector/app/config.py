@@ -17,6 +17,8 @@ class CollectorSettings(BaseSettings):
     LOCAL_AGENT_TOKEN: str = os.getenv("LOCAL_AGENT_TOKEN", "signal-scanner-local-agent-token-2026")
     
     PLATFORM: str = platform.system().lower()  # windows, linux, darwin
+    LOCAL_AGENT_HOST: str = os.getenv("LOCAL_AGENT_HOST", "0.0.0.0")
+    LOCAL_AGENT_PORT: int = int(os.getenv("LOCAL_AGENT_PORT", "8001"))
     BUFFER_DB_PATH: str = os.getenv("BUFFER_DB_PATH", "./collector_offline_buffer.db")
     MAX_BUFFER_RECORDS: int = 5000
 

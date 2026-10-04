@@ -67,6 +67,7 @@ class ChannelHealthService:
         for m in measurements_db:
             latest_meas_by_target[m.target_id] = m
             measurement_dicts.append({
+                "target_id": m.target_id,
                 "channel": m.channel,
                 "band": m.band,
                 "signal_value": m.signal_value,

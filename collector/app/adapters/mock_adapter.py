@@ -65,11 +65,12 @@ class MockSignalAdapter(SignalAdapter):
 
     async def start(self, config: ScanConfig) -> AsyncIterator[Dict[str, Any]]:
         self._running = True
+        self._seq = config.initial_sequence
         interval = max(0.2, config.sample_interval_ms / 1000.0)
         start_time = asyncio.get_event_loop().time()
 
         while self._running:
-            if config.duration_seconds and (asyncio.get_event_loop().time() - start_time) >= config.duration_seconds:
+            if config.duration_seconds is not None and (asyncio.get_event_loop().time() - start_time) >= config.duration_seconds:
                 break
             self._seq += 1
             batch = self._generate_batch(config)
@@ -213,7 +214,7 @@ class MockSignalAdapter(SignalAdapter):
             "schema_version": "2.0",
             "session_id": config.session_id,
             "collector_id": collector_settings.COLLECTOR_ID,
-            "source_type": "simulator",
+            "source_type": config.source_type or "collector",
             "sequence_from": self._seq,
             "sequence_to": self._seq,
             "sent_at": now_iso,

@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 from .common import ScanMode
 
-FreshnessState = Literal["fresh", "stale", "expired", "unknown"]
+FreshnessState = Literal["fresh", "stale", "expired", "simulated", "unknown"]
 SourceMethod = Literal[
     "windows_native_wifi",
     "windows_netsh_fallback",
@@ -14,7 +14,7 @@ SourceMethod = Literal[
     "virtual_simulator",
     "unknown",
 ]
-RssiProcessing = Literal["raw", "os_filtered", "app_smoothed", "unknown"]
+RssiProcessing = Literal["raw", "os_filtered", "app_smoothed", "synthetic", "unknown"]
 
 ChannelMetricType = Literal[
     "bss_overlap_index",

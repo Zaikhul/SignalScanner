@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import { SessionProvenanceManifest } from "@/lib/types";
+import { apiClient } from "@/lib/apiClient";
 import {
   FileText,
   DownloadSimple,
@@ -26,6 +27,7 @@ export function SessionProvenanceDrawer({
 }: SessionProvenanceDrawerProps) {
   const [manifest, setManifest] = useState<SessionProvenanceManifest | null>(null);
   const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -33,13 +35,8 @@ export function SessionProvenanceDrawer({
     if (isOpen && sessionId) {
       setLoading(true);
       setError(null);
-      fetch(`/api/v1/sessions/${sessionId}/manifest`)
-        .then((res) => {
-          if (!res.ok) {
-            throw new Error(`Manifest not ready or not found (HTTP ${res.status})`);
-          }
-          return res.json();
-        })
+      apiClient
+        .getSessionManifest(sessionId)
         .then((data) => setManifest(data))
         .catch((err) => setError(err.message))
         .finally(() => setLoading(false));
@@ -147,14 +144,24 @@ export function SessionProvenanceDrawer({
         </div>
 
         <div className="flex items-center justify-between border-t border-zinc-800 pt-4">
-          <a
-            href={`/api/v1/sessions/${sessionId}/evidence-bundle`}
-            download
-            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 transition-colors shadow-lg shadow-emerald-600/20"
+          <button
+            onClick={async () => {
+              setDownloading(true);
+              try {
+                await apiClient.downloadEvidenceBundle(sessionId);
+              } catch (e: any) {
+                console.error("Failed to download evidence bundle", e);
+                setError(e?.message || "Failed to download evidence bundle");
+              } finally {
+                setDownloading(false);
+              }
+            }}
+            disabled={downloading}
+            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 transition-colors shadow-lg shadow-emerald-600/20 disabled:opacity-50"
           >
             <DownloadSimple size={14} weight="bold" />
-            Unduh Evidence Bundle (ZIP)
-          </a>
+            {downloading ? "Mengunduh..." : "Unduh Evidence Bundle (ZIP)"}
+          </button>
 
           <button
             onClick={onClose}

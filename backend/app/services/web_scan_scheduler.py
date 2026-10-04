@@ -19,6 +19,7 @@ from app.db.web_scan_models import (
     WebScanFindingModel,
     WebScanJobModel,
     WebScanObservationModel,
+    WebScanScopeModel,
 )
 from app.schemas.web_scan import ScanConfiguration, ScanState, WebScanEvent
 
@@ -33,6 +34,7 @@ class WebScanScheduler:
         self._worker_task: Optional[asyncio.Task] = None
         self._cancel_events: Dict[str, asyncio.Event] = {}
         self._active_tasks: Dict[str, asyncio.Task] = {}
+        self._job_semaphore: Optional[asyncio.Semaphore] = None
         self._global_semaphore: Optional[asyncio.Semaphore] = None
         self._mock_transport: Optional[httpx.AsyncBaseTransport] = None
         self._wake_event = asyncio.Event()
@@ -187,23 +189,47 @@ class WebScanScheduler:
 
     async def _execute_job_wrapper(self, job_id: str, cancel_event: asyncio.Event) -> None:
         """Executes a single job within semaphore and manages persistence of results."""
+        if not self._job_semaphore:
+            self._job_semaphore = asyncio.Semaphore(50)
         if not self._global_semaphore:
             self._global_semaphore = asyncio.Semaphore(
                 getattr(settings, "WEB_SCAN_GLOBAL_MAX_CONCURRENCY", 10000)
             )
 
-        async with self._global_semaphore:
+        async with self._job_semaphore:
             if cancel_event.is_set():
                 logger.info("Job %s was cancelled before acquiring semaphore slot; aborting", job_id)
                 return
 
             try:
                 # Load job details and enforce CAS transition from QUEUED -> SCANNING (F-07)
+                scope_rules = None
                 async with AsyncSessionLocal() as db:
                     job = await db.get(WebScanJobModel, job_id)
                     if not job or job.status == ScanState.CANCELLED.value or cancel_event.is_set():
                         logger.info("Job %s is cancelled or absent; aborting execution", job_id)
                         return
+
+                    # Re-validate scope grant revocation/expiration before scanning (QA-02)
+                    if job.scope_id:
+                        scope_record = await db.get(WebScanScopeModel, job.scope_id)
+                        now_utc = datetime.now(timezone.utc)
+                        if not scope_record or scope_record.revoked_at:
+                            logger.warning("Scope grant %s revoked for job %s; aborting", job.scope_id, job_id)
+                            job.status = ScanState.CANCELLED.value
+                            job.status_reason = "Scope grant has been revoked"
+                            await db.commit()
+                            return
+                        exp = scope_record.expires_at
+                        if exp.tzinfo is None:
+                            exp = exp.replace(tzinfo=timezone.utc)
+                        if exp < now_utc:
+                            logger.warning("Scope grant %s expired for job %s; aborting", job.scope_id, job_id)
+                            job.status = ScanState.CANCELLED.value
+                            job.status_reason = "Scope grant has expired"
+                            await db.commit()
+                            return
+                        scope_rules = scope_record.rules
 
                     now = datetime.now(timezone.utc)
                     update_stmt = (
@@ -259,6 +285,7 @@ class WebScanScheduler:
                     event_sink=event_sink,
                     initial_sequence=current_seq,
                     global_semaphore=self._global_semaphore,
+                    scope_rules=scope_rules,
                 )
 
                 final_state, scan_result, findings, observations, errors, status_reason = (

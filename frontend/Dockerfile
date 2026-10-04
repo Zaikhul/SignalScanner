@@ -9,6 +9,10 @@ RUN pnpm install --frozen-lockfile || pnpm install
 
 ARG NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ARG NEXT_PUBLIC_API_AUTH_TOKEN
+ENV NEXT_PUBLIC_API_AUTH_TOKEN=${NEXT_PUBLIC_API_AUTH_TOKEN}
+ARG NEXT_PUBLIC_LOCAL_COLLECTOR_TOKEN
+ENV NEXT_PUBLIC_LOCAL_COLLECTOR_TOKEN=${NEXT_PUBLIC_LOCAL_COLLECTOR_TOKEN}
 
 COPY . .
 RUN mkdir -p public
@@ -19,12 +23,23 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
 
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/.next ./.next
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
 COPY --from=builder /app/public ./public
-COPY --from=builder /app/node_modules ./node_modules
+
+# Set correct permission for prerender cache
+RUN mkdir .next
+RUN chown nextjs:nodejs .next
+
+# Leverage Next.js standalone output
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
 
 EXPOSE 3000
 
-CMD ["node_modules/.bin/next", "start"]
+CMD ["node", "server.js"]

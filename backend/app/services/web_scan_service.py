@@ -269,6 +269,7 @@ class WebScanService:
         # Validate target URL and policy
         config = req.configuration or ScanConfiguration()
         allow_private = config.allow_private
+        allow_loopback = getattr(config, "allow_loopback", False)
 
         # Validate Scope if specified (F-02)
         scope_record = None
@@ -346,6 +347,16 @@ class WebScanService:
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"Requested job_timeout_seconds ({config.job_timeout_seconds}) exceeds scope grant budget limit ({grant_budget['job_timeout_seconds']})",
                 )
+            if (
+                req.configuration
+                and "requests_per_second" in req.configuration.model_fields_set
+                and "requests_per_second" in grant_budget
+                and config.requests_per_second > grant_budget["requests_per_second"]
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Requested requests_per_second ({config.requests_per_second}) exceeds scope grant budget limit ({grant_budget['requests_per_second']})",
+                )
 
             # If scope grants allow private or loopback, inherit
             for rule in scope_record.rules:
@@ -354,13 +365,11 @@ class WebScanService:
                 if rule.get("allow_loopback"):
                     allow_loopback = True
 
-        allow_loopback = getattr(config, "allow_loopback", False) if config else False
-
         # Check server-level private network enforcement
-        if allow_private and not settings.WEB_SCAN_ALLOW_PRIVATE_NETWORKS:
+        if (allow_private or allow_loopback) and not settings.WEB_SCAN_ALLOW_PRIVATE_NETWORKS:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Private network scans are prohibited by server configuration",
+                detail="Private network and loopback scans are prohibited by server configuration",
             )
 
         try:
@@ -400,6 +409,21 @@ class WebScanService:
             settings.WEB_SCAN_PER_ORIGIN_CONCURRENCY,
             grant_budget.get("per_origin_concurrency", settings.WEB_SCAN_PER_ORIGIN_CONCURRENCY) if scope_record else settings.WEB_SCAN_PER_ORIGIN_CONCURRENCY,
         )
+        if scope_record and "requests_per_second" in grant_budget:
+            eff_config["requests_per_second"] = min(
+                config.requests_per_second,
+                float(grant_budget["requests_per_second"]),
+            )
+        if scope_record and "max_requests" in grant_budget:
+            eff_config["max_requests"] = min(
+                config.max_requests,
+                int(grant_budget["max_requests"]),
+            )
+        if scope_record and "job_timeout_seconds" in grant_budget:
+            eff_config["job_timeout_seconds"] = min(
+                config.job_timeout_seconds,
+                int(grant_budget["job_timeout_seconds"]),
+            )
         if ModuleId.STRESS in eff_config.get("modules", []):
             if scope_record and not scope_record.allow_load:
                 eff_config["modules"] = [m for m in eff_config["modules"] if m != ModuleId.STRESS]

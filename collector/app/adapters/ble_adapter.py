@@ -93,6 +93,7 @@ class BleakSignalAdapter(SignalAdapter):
 
     async def start(self, config: ScanConfig) -> AsyncIterator[Dict[str, Any]]:
         self._running = True
+        self._seq = config.initial_sequence
         interval = max(0.5, config.sample_interval_ms / 1000.0)
 
         try:

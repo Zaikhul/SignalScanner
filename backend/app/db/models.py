@@ -217,7 +217,7 @@ class SessionManifestModel(Base):
         String(64), primary_key=True, default=lambda: f"mnf_{uuid.uuid4().hex[:12]}"
     )
     session_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("scan_sessions.id", ondelete="CASCADE"), nullable=False
+        String(64), ForeignKey("scan_sessions.id", ondelete="CASCADE"), nullable=False, index=True
     )
     manifest_version: Mapped[str] = mapped_column(String(16), default="1.0")
     manifest_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
@@ -237,7 +237,7 @@ class ChannelMetricModel(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("scan_sessions.id", ondelete="CASCADE"), nullable=False
+        String(64), ForeignKey("scan_sessions.id", ondelete="CASCADE"), nullable=False, index=True
     )
     channel: Mapped[int] = mapped_column(Integer, nullable=False)
     metric_type: Mapped[str] = mapped_column(String(64), nullable=False)  # bss_overlap_index, advertised_channel_load, measured_airtime_utilization, energy_occupancy
@@ -264,7 +264,7 @@ class ExportAuditLogModel(Base):
         String(64), primary_key=True, default=lambda: f"aud_{uuid.uuid4().hex[:8]}"
     )
     session_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("scan_sessions.id", ondelete="CASCADE"), nullable=False
+        String(64), ForeignKey("scan_sessions.id", ondelete="CASCADE"), nullable=False, index=True
     )
     format: Mapped[str] = mapped_column(String(64), default="json")
     scope: Mapped[str] = mapped_column(String(64), default="full_session")

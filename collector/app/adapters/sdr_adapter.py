@@ -64,6 +64,7 @@ class SoapySDRSignalAdapter(SignalAdapter):
 
     async def start(self, config: ScanConfig) -> AsyncIterator[Dict[str, Any]]:
         self._running = True
+        self._seq = config.initial_sequence
         center_freq = config.center_frequency_hz or 433920000
         sample_rate = config.sample_rate_hz or 2048000
         gain = config.gain_db or 20.0

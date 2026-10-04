@@ -93,6 +93,7 @@ class BatchUploader:
                     res = await client.post("/api/v1/collector-ingest/batches", json=item["batch"])
                     if res.status_code == 200:
                         await buffer_queue.remove_batch(db_id)
+                        continue
                     elif res.status_code in (408, 429) or res.status_code >= 500:
                         # Transient error: increment retry count
                         new_retries = await buffer_queue.increment_retry(db_id)
@@ -128,18 +129,18 @@ class BatchUploader:
                 except Exception as e:
                     # Network unreachable: increment retry count and stop draining
                     new_retries = await buffer_queue.increment_retry(db_id)
-                if new_retries >= MAX_RETRIES:
-                    logger.warning(
-                        f"Batch {db_id} exceeded MAX_RETRIES on network error ({e}). Moving to dead-letter queue."
-                    )
-                    await buffer_queue.remove_batch(db_id)
-                    await buffer_queue.push_dead_letter(
-                        session_id=session_id,
-                        status_code=None,
-                        error_reason=f"EXCEEDED_MAX_RETRIES ({new_retries}): NetworkError {e}",
-                        batch=item["batch"],
-                    )
-                break
+                    if new_retries >= MAX_RETRIES:
+                        logger.warning(
+                            f"Batch {db_id} exceeded MAX_RETRIES on network error ({e}). Moving to dead-letter queue."
+                        )
+                        await buffer_queue.remove_batch(db_id)
+                        await buffer_queue.push_dead_letter(
+                            session_id=session_id,
+                            status_code=None,
+                            error_reason=f"EXCEEDED_MAX_RETRIES ({new_retries}): NetworkError {e}",
+                            batch=item["batch"],
+                        )
+                    break
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:

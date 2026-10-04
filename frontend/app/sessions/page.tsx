@@ -34,8 +34,8 @@ export default function SessionsHistoryPage() {
     setExportingId(sessionId);
     try {
       const exp = await apiClient.createExport(sessionId, format);
-      // Trigger download
-      window.open(apiClient.getDownloadUrl(exp.id), "_blank");
+      // Trigger authenticated download
+      await apiClient.downloadExportFile(exp.id);
     } catch (e) {
       console.error("Failed to export session", e);
     } finally {

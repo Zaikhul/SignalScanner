@@ -78,6 +78,8 @@ async def create_web_scan(
         # Notify background scheduler to claim pending job
         web_scan_scheduler.trigger()
         return job
+    except HTTPException:
+        raise
     except ValueError as val_err:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(val_err))
     except Exception as exc:

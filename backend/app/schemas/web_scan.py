@@ -263,6 +263,14 @@ class Evidence(BaseModel):
     body_truncated: bool = False
     catalog_entry_id: Optional[str] = None
 
+    @field_validator("url_display", mode="before")
+    @classmethod
+    def sanitize_display_url(cls, v: Any) -> str:
+        if isinstance(v, str):
+            from app.core.web_scan.network_policy import redact_url_query_params
+            return redact_url_query_params(v)
+        return ""
+
 
 class ScanFinding(BaseModel):
     id: str

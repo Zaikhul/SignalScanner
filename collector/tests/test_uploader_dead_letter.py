@@ -46,6 +46,8 @@ async def test_buffer_queue_auto_quarantine_legacy_sessions(tmp_path):
 
 @pytest.mark.asyncio
 async def test_uploader_dead_letter_quarantine_on_404():
+    from collector.app.core.buffer_queue import buffer_queue
+    await buffer_queue.init_queue()
     uploader = BatchUploader()
     test_batch = {
         "schema_version": "1.0",

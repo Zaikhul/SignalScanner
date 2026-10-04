@@ -16,6 +16,8 @@ class ScanConfig(BaseModel):
     session_id: str
     sample_interval_ms: int = 500
     duration_seconds: Optional[int] = None
+    initial_sequence: int = 0
+    source_type: Optional[str] = "collector"
     # Radio specific
     center_frequency_hz: Optional[int] = 433920000
     span_hz: Optional[int] = 2000000
