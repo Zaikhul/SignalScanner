@@ -9,8 +9,11 @@ Sistem instrumen pengukuran kekuatan sinyal multi-mode real-time dengan antarmuk
 - **Multi-Mode Scanning**:
   - **WiFi (802.11)**: Pemindaian Access Point, RSSI (dBm), visualisasi kepadatan kanal (*channel occupancy*) 2.4 GHz & 5 GHz, band filtering, rekomendasi kesehatan kanal, dan deteksi SSID/BSSID.
   - **Bluetooth Low Energy (BLE)**: Pemantauan beacon pasif (`Bleak`), pelacakan pergerakan RSSI, filter manufacturer data, dan UUID service.
-  - **Radio (SDR)**: Penerima spektrum RF (`SoapySDR`) dengan tampilan garis FFT (*dBFS power*), parameter bandwidth/sample rate dinamis, dan **Spectrum Waterfall 2D** real-time.
-  - **Ghost Web Scanner**: Audit keamanan web cerdas dan stress resilience testing terikat (*bounded DDoS load testing*), mitigasi SSRF dengan DNS pinning terisolasi, token-bucket rate limiting, dan live event streaming via SSE.
+  - **Ghost Web Scanner & 3D Globe Topologi**:
+    - Audit keamanan web terisolasi dengan 7 modul deteksi (recon, security headers, cookie audit, HTML forms/CSRF, parameter diagnostics, header injection probes, dan load resilience).
+    - Stress resilience testing terikat (*bounded DDoS load testing*) dengan token-bucket rate limiting dan mitigasi SSRF berbasis DNS pinning terisolasi.
+    - **Visualisasi 3D Globe Interaktif**: Visualisasi spasial node dan busur relasi host/IP berbasis Three.js dengan filter koneksi, inspektur detail relasi, dan integrasi geolokasi IP real-time.
+    - Live event streaming via Server-Sent Events (SSE) dan ekspor hasil audit bertanda tangan SHA-256.
 - **Channel Health & Recommendations**:
   - Deteksi interferensi co-channel dan adjacent-channel secara cerdas.
   - Perhitungan ketidakstabilan temporal multi-AP (*temporal instability score*).
@@ -42,10 +45,10 @@ signal-scanner/
 │   ├── app/
 │   │   ├── api/v1/                            # REST Endpoints (collectors, sessions, channel-health, web-scans, exports, ingest)
 │   │   ├── api/ws/                            # WebSocket /ws/v1/sessions stream hub
-│   │   ├── core/                              # Signal math (EMA, FFT peaks), Channel Health & Web Scan Engine
+│   │   ├── core/                              # Signal math (EMA, FFT peaks), Channel Health & Web Scan Engine (hardening, geolocation)
 │   │   ├── db/                                # SQLAlchemy 2 async models & session factory
-│   │   ├── schemas/                           # Pydantic v2 data contracts
-│   │   └── services/                          # Session state machine, web scan scheduler & export services
+│   │   ├── schemas/                           # Pydantic v2 data contracts (signals, web scan, geography)
+│   │   └── services/                          # Session state machine, web scan scheduler, geography & export services
 │   ├── migrations/                            # Alembic database migration scripts (0001 - 0005)
 │   ├── scripts/                               # Utilitas koneksi database & preflight_deploy_check.py
 │   └── tests/                                 # Pytest unit & integration tests
@@ -60,7 +63,7 @@ signal-scanner/
     ├── components/
     │   ├── controls/                          # ModeRail, CollectorPicker, SessionControls, MarkerModal
     │   ├── visualizers/                       # ScanField, SweepArm, ChannelOccupancy, SpectrumWaterfall, MetricStrip
-    │   ├── web-scanner/                       # WebScanControls, WebScanSummary, StatusBadge, FindingCard
+    │   ├── web-scanner/                       # WebScanControls, WebScanSummary, StatusBadge, FindingCard, WebScanGlobe, WebScanGeographyPanel
     │   ├── inspector/                         # TargetInspector, TargetTable
     │   └── layout/                            # AppShell, Header, ConnectionBanner
     ├── hooks/                                 # useSessionStream WebSocket hook
@@ -264,3 +267,4 @@ pnpm lint
 | `GET` | `/api/v1/web-scans/{id}/stream` | Server-Sent Events (SSE) live streaming progres scan |
 | `POST` | `/api/v1/web-scans/{id}/cancel` | Membatalkan pemindaian web yang sedang aktif |
 | `GET` | `/api/v1/web-scans/{id}/export` | Ekspor hasil temuan dan metrik web scan (JSON/CSV) |
+| `GET` | `/api/v1/web-scans/{id}/geography` | Topologi geolokasi IP, node target, busur koneksi, dan relasi endpoint scan |

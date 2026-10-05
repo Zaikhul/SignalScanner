@@ -15,9 +15,9 @@ export function WebScanControls() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [allowPrivate, setAllowPrivate] = useState(false);
   const [timeoutSec, setTimeoutSec] = useState(600);
-  const [maxConcurrency, setMaxConcurrency] = useState(50);
-  const [rps, setRps] = useState(50.0);
-  const [maxRequests, setMaxRequests] = useState(5000);
+  const [maxConcurrency, setMaxConcurrency] = useState(100000);
+  const [rps, setRps] = useState(10000);
+  const [maxRequests, setMaxRequests] = useState(1000000);
   const [submitting, setSubmitting] = useState(false);
 
   async function handleStartScan(e: React.FormEvent) {
@@ -168,7 +168,7 @@ export function WebScanControls() {
               <input
                 type="number"
                 min="1"
-                max="10000"
+                max="100000"
                 value={maxConcurrency}
                 onChange={(e) => setMaxConcurrency(Number(e.target.value))}
                 disabled={isScanning}
@@ -180,7 +180,7 @@ export function WebScanControls() {
               <input
                 type="number"
                 min="0.5"
-                max="1000"
+                max="10000"
                 step="1"
                 value={rps}
                 onChange={(e) => setRps(Number(e.target.value))}
@@ -193,8 +193,8 @@ export function WebScanControls() {
               <input
                 type="number"
                 min="10"
-                max="100000"
-                step="500"
+                max="10000000"
+                step="10000"
                 value={maxRequests}
                 onChange={(e) => setMaxRequests(Number(e.target.value))}
                 disabled={isScanning}
