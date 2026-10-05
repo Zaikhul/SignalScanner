@@ -83,10 +83,10 @@ class ErrorStage(str, enum.Enum):
 class RequestBudget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    max_concurrency: int = Field(default=10, ge=1, le=50)
-    per_origin_concurrency: int = Field(default=5, ge=1, le=20)
-    requests_per_second: float = Field(default=5.0, ge=0.5, le=50.0)
-    max_requests: int = Field(default=1000, ge=10, le=5000)
+    max_concurrency: int = Field(default=100000, ge=1, le=100000)
+    per_origin_concurrency: int = Field(default=50000, ge=1, le=50000)
+    requests_per_second: float = Field(default=10000.0, ge=0.5, le=10000.0)
+    max_requests: int = Field(default=10000000, ge=10, le=10000000)
     job_timeout_seconds: int = Field(default=600, ge=30, le=3600)
 
 
@@ -131,7 +131,7 @@ class LoadConfiguration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     method: Literal["GET", "POST"] = "GET"
-    concurrency: int = Field(default=10000, ge=1, le=10000)
+    concurrency: int = Field(default=100000, ge=1, le=100000)
     duration_seconds: int = Field(default=600, ge=1, le=3600)
     delay_seconds: float = Field(default=0.05, ge=0.01, le=5.0)
     body_template: Literal["none", "benign_5k"] = "none"
@@ -146,11 +146,11 @@ class ScanConfiguration(BaseModel):
     tls_verify: bool = True
     allow_private: bool = False
     allow_loopback: bool = False
-    max_concurrency: int = Field(default=10000, ge=1, le=10000)
-    per_origin_concurrency: int = Field(default=5000, ge=1, le=10000)
-    requests_per_second: float = Field(default=1000.0, ge=0.5, le=10000.0)
-    max_requests: int = Field(default=10000, ge=10, le=1000000)
-    job_timeout_seconds: int = Field(default=600, ge=30, le=7200)
+    max_concurrency: int = Field(default=100000, ge=1, le=100000)
+    per_origin_concurrency: int = Field(default=50000, ge=1, le=50000)
+    requests_per_second: float = Field(default=10000.0, ge=0.5, le=10000.0)
+    max_requests: int = Field(default=10000000, ge=10, le=10000000)
+    job_timeout_seconds: int = Field(default=600, ge=30, le=3600)
     retry_attempts: int = Field(default=0, ge=0, le=0)
     geolocation_enabled: bool = False
     user_agent_profile: Literal["source_rotation", "fixed"] = "source_rotation"
@@ -401,7 +401,7 @@ class WebScanEvent(BaseModel):
     occurred_at: datetime
     type: Literal[
         "snapshot", "state_changed", "progress", "finding_upserted",
-        "observation_added", "error_added", "completed"
+        "observation_added", "error_added", "completed", "cancelled", "failed"
     ]
     payload: Any
 

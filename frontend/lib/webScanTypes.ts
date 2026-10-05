@@ -267,7 +267,9 @@ export interface WebScanEvent {
     | "finding_upserted"
     | "observation_added"
     | "error_added"
-    | "completed";
+    | "completed"
+    | "cancelled"
+    | "failed";
   payload: any;
 }
 
@@ -307,4 +309,89 @@ export interface Capabilities {
   defaults: ScanConfiguration;
   hard_caps: Record<string, any>;
   readiness: Record<string, boolean>;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Geography & Relationship Graph Types (web_scan.geo.v1)
+// ──────────────────────────────────────────────────────────────────────────
+
+export interface GeoPoint {
+  latitude: number;
+  longitude: number;
+  city?: string | null;
+  region?: string | null;
+  country?: string | null;
+  country_code?: string | null;
+}
+
+export type EndpointRole = "source" | "target";
+
+export type AddressBasis =
+  | "configured"
+  | "dns_candidate"
+  | "transport_selected"
+  | "observed_connection"
+  | "unresolved";
+
+export type LocationLevel = "coordinates" | "city" | "region" | "country" | "unknown";
+export type LocationBasis = "configured" | "ip_lookup_estimate" | "unknown";
+export type LocationStatus = "located" | "unknown" | "unsupported" | "lookup_failed" | "disallowed";
+
+export interface GeoEndpoint {
+  id: string;
+  role: EndpointRole;
+  display_name: string;
+  ip?: string | null;
+  address_basis: AddressBasis;
+  executor_id?: string | null;
+  location?: GeoPoint | null;
+  location_level: LocationLevel;
+  location_basis: LocationBasis;
+  location_status: LocationStatus;
+  status_reason?: string | null;
+  provider_info?: string | null;
+}
+
+export type RelationBasis = "observed_http" | "transport_attempt" | "configured_target";
+
+export interface GeoRelation {
+  id: string;
+  source_endpoint_id: string;
+  target_endpoint_id: string;
+  direction: "source_to_target";
+  relation_basis: RelationBasis;
+  record_count: number;
+  unit: "records";
+  status_codes: number[];
+  methods: string[];
+  supporting_observation_ids: string[];
+  linked_finding_ids: string[];
+}
+
+export interface GeoCoverage {
+  observations_total: number;
+  observations_stored: number;
+  eligible_records: number;
+  both_located_count: number;
+  partial_located_count: number;
+  unlocated_count: number;
+  is_subset: boolean;
+  storage_ceiling: number;
+}
+
+export type GeoReadinessStatus = "ready" | "processing" | "empty" | "no_locations" | "partial";
+
+export interface WebScanGeographyResponse {
+  scan_id: string;
+  schema_version: "web_scan.geo.v1";
+  data_revision: number;
+  generated_at: string;
+  readiness_status: GeoReadinessStatus;
+  target_display: string;
+  scan_status: string;
+  coverage: GeoCoverage;
+  endpoints: GeoEndpoint[];
+  relations: GeoRelation[];
+  time_info: Record<string, any>;
+  disclaimers: Record<string, string>;
 }

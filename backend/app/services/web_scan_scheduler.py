@@ -210,7 +210,7 @@ class WebScanScheduler:
                         logger.info("Job %s is cancelled or absent; aborting execution", job_id)
                         return
 
-                    # Re-validate scope grant revocation/expiration before scanning (QA-02)
+                    # Re-validate scope grant revocation/expiration before scanning (QA-02, F-01)
                     if job.scope_id:
                         scope_record = await db.get(WebScanScopeModel, job.scope_id)
                         now_utc = datetime.now(timezone.utc)
@@ -230,6 +230,20 @@ class WebScanScheduler:
                             await db.commit()
                             return
                         scope_rules = scope_record.rules
+                    else:
+                        from app.core.web_scan.network_policy import parse_and_validate_target
+                        try:
+                            norm_info = parse_and_validate_target(job.normalized_target)
+                            scope_rules = [{
+                                "host": norm_info.hostname,
+                                "ports": [norm_info.port],
+                                "path_prefixes": ["/"],
+                                "allowed_cidrs": [],
+                                "allow_private": job.effective_configuration.get("allow_private", False),
+                                "allow_loopback": job.effective_configuration.get("allow_loopback", False),
+                            }]
+                        except Exception:
+                            scope_rules = None
 
                     now = datetime.now(timezone.utc)
                     update_stmt = (
@@ -383,12 +397,17 @@ class WebScanScheduler:
                         payload={"status": final_state.value},
                     )
                 )
+                terminal_event_type = (
+                    "completed"
+                    if final_state in (ScanState.COMPLETED, ScanState.SUCCESS)
+                    else ("cancelled" if final_state in (ScanState.CANCELLED, ScanState.CANCELLING) else "failed")
+                )
                 await event_sink(
                     WebScanEvent(
                         scan_id=job_id,
                         sequence=next_seq + 1,
                         occurred_at=datetime.now(timezone.utc),
-                        type="completed",
+                        type=terminal_event_type,
                         payload=summary_dict,
                     )
                 )
