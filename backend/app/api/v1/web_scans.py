@@ -23,8 +23,10 @@ from app.schemas.web_scan import (
     WebScanEvent,
 )
 from app.services.web_scan_export_service import WebScanExportService
+from app.services.web_scan_geography_service import WebScanGeographyService
 from app.services.web_scan_scheduler import web_scan_scheduler
 from app.services.web_scan_service import WebScanService
+from app.schemas.web_scan_geography import WebScanGeographyResponse
 
 router = APIRouter(
     prefix="/web-scans",
@@ -238,6 +240,35 @@ async def get_web_scan_observations(
         offset=offset,
     )
     return Page(items=items, total=total)
+
+
+@router.get(
+    "/{scan_id}/geography",
+    response_model=WebScanGeographyResponse,
+    summary="Retrieve geographic relation endpoints and visualization arcs for a scan",
+)
+async def get_web_scan_geography(
+    scan_id: str,
+    principal: OperatorPrincipal = Depends(require_permission("web_scan:read")),
+    db: AsyncSession = Depends(get_db),
+):
+    _check_enabled()
+    if not settings.WEB_SCAN_GEOGRAPHY_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Web scan geography feature is disabled by policy",
+        )
+    geo = await WebScanGeographyService.get_scan_geography(
+        db=db,
+        tenant_id=principal.tenant_id,
+        scan_id=scan_id,
+    )
+    if not geo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scan job {scan_id} not found",
+        )
+    return geo
 
 
 @router.get(
