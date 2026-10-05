@@ -223,15 +223,20 @@ async def resolve_and_validate_hostname(
 
     loop = asyncio.get_running_loop()
     try:
-        # socket.getaddrinfo is run in executor to keep async loop responsive
-        addrinfo = await loop.run_in_executor(
-            None,
-            socket.getaddrinfo,
-            hostname,
-            port,
-            socket.AF_UNSPEC,
-            socket.SOCK_STREAM,
+        # socket.getaddrinfo is run in executor to keep async loop responsive, bounded by timeout (F-16)
+        addrinfo = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                socket.getaddrinfo,
+                hostname,
+                port,
+                socket.AF_UNSPEC,
+                socket.SOCK_STREAM,
+            ),
+            timeout=5.0,
         )
+    except asyncio.TimeoutError:
+        raise ValueError(f"DNS resolution timed out for hostname '{hostname}'")
     except socket.gaierror as e:
         raise ValueError(f"DNS resolution failed for hostname '{hostname}': {e}")
 
@@ -272,6 +277,7 @@ def validate_target_against_scope(
     target_url: str,
     rules: List[Dict[str, Any]],
     method: Optional[str] = None,
+    resolved_ips: Optional[List[str]] = None,
 ) -> Tuple[bool, Optional[str]]:
     """Checks whether the target URL conforms to scope grant rules, methods, and CIDRs."""
     try:
@@ -296,16 +302,19 @@ def validate_target_against_scope(
         if ports and norm.port not in ports:
             continue
 
-        # Check path prefixes with normalized path
+        # Check path prefixes with normalized path (strict subtree match F-01)
         prefixes = rule.get("path_prefixes", ["/"])
-        norm_prefixes = []
+        norm_req_path = posixpath.normpath(norm.path)
+        matched_prefix = False
         for p in prefixes:
             if not p or p == "/":
-                norm_prefixes.append("/")
-            else:
-                n = posixpath.normpath(p)
-                norm_prefixes.append(n.rstrip("/") + "/" if p.endswith("/") else n)
-        if norm_prefixes and not any(norm.path.startswith(p) for p in norm_prefixes):
+                matched_prefix = True
+                break
+            n = posixpath.normpath(p)
+            if norm_req_path == n or norm_req_path.startswith(n.rstrip("/") + "/"):
+                matched_prefix = True
+                break
+        if not matched_prefix:
             continue
 
         # Check methods if specified
@@ -314,17 +323,25 @@ def validate_target_against_scope(
             if method.upper() not in [m.upper() for m in allowed_methods]:
                 continue
 
-        # Check allowed CIDRs if specified
+        # Check allowed CIDRs if specified (F-01)
         allowed_cidrs = rule.get("allowed_cidrs", [])
         if allowed_cidrs:
+            networks = [ipaddress.ip_network(c) for c in allowed_cidrs]
             try:
                 ip_obj = ipaddress.ip_address(norm.hostname)
-                in_cidr = any(ip_obj in ipaddress.ip_network(c) for c in allowed_cidrs)
-                if not in_cidr:
+                if not any(ip_obj in net for net in networks):
                     continue
             except ValueError:
-                # Hostname is a domain name, not IP literal
-                pass
+                # Hostname is a domain name. Verify against provided resolved_ips or resolve.
+                check_ips = resolved_ips
+                if check_ips is None:
+                    try:
+                        addrinfo = socket.getaddrinfo(norm.hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+                        check_ips = [item[4][0] for item in addrinfo]
+                    except Exception:
+                        check_ips = []
+                if not check_ips or not all(any(ipaddress.ip_address(ip) in net for net in networks) for ip in check_ips):
+                    continue
 
         return True, None
 

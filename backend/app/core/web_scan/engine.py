@@ -136,6 +136,7 @@ class WebScanEngine:
             await self._emit_event("state_changed", {"status": ScanState.SCANNING.value})
 
             root_response: Optional[WebScanResponse] = None
+            effective_target_url: str = self.target_url
             discovered_forms: List[DiscoveredForm] = []
             discovered_links: List[str] = []
 
@@ -170,12 +171,14 @@ class WebScanEngine:
                         all_observations.extend(mod_obs)
                         root_response = res.get("root_response")
 
-                        # Capture root response for downstream modules if not already captured
+                        # Capture root response and final effective redirected URL (F-08)
                         if not root_response:
                             for obs in mod_obs:
                                 if obs.get("kind") == "http_response":
                                     root_response = await http_client.fetch(self.target_url)
                                     break
+                        if root_response:
+                            effective_target_url = str(root_response.url)
 
                         # Mark recon checks accurately (F-08, F-15)
                         if not root_response and res.get("status") == "failed":
@@ -198,8 +201,10 @@ class WebScanEngine:
                     elif mod == ModuleId.HEADERS:
                         if not root_response:
                             root_response = await http_client.fetch(self.target_url)
+                            if root_response:
+                                effective_target_url = str(root_response.url)
                         if root_response:
-                            sec_headers = SecurityHeadersModule(root_response, self.target_url)
+                            sec_headers = SecurityHeadersModule(root_response, effective_target_url)
                             res = sec_headers.run()
                             mod_findings = res.get("findings", [])
                             all_raw_findings.extend(mod_findings)
@@ -217,8 +222,10 @@ class WebScanEngine:
                     elif mod == ModuleId.COOKIES:
                         if not root_response:
                             root_response = await http_client.fetch(self.target_url)
+                            if root_response:
+                                effective_target_url = str(root_response.url)
                         if root_response:
-                            cookie_audit = CookieAuditModule(root_response, self.target_url)
+                            cookie_audit = CookieAuditModule(root_response, effective_target_url)
                             res = cookie_audit.run()
                             mod_findings = res.get("findings", [])
                             all_raw_findings.extend(mod_findings)
@@ -236,11 +243,13 @@ class WebScanEngine:
                     elif mod == ModuleId.FORMS:
                         if not root_response:
                             root_response = await http_client.fetch(self.target_url)
+                            if root_response:
+                                effective_target_url = str(root_response.url)
                         if root_response:
                             discovered_forms, discovered_links = parse_page_html(
-                                self.target_url, root_response.text
+                                effective_target_url, root_response.text
                             )
-                            forms_mod = FormsModule(root_response, self.target_url)
+                            forms_mod = FormsModule(root_response, effective_target_url)
                             res = forms_mod.run()
                             mod_findings = res.get("findings", [])
                             all_raw_findings.extend(mod_findings)
@@ -256,13 +265,18 @@ class WebScanEngine:
                                     entry.reason_code = "ROOT_TARGET_UNREACHABLE"
 
                     elif mod == ModuleId.PARAMETERS:
+                        if not root_response:
+                            root_response = await http_client.fetch(self.target_url)
+                            if root_response:
+                                effective_target_url = str(root_response.url)
                         if not discovered_forms and root_response:
-                            discovered_forms, _ = parse_page_html(self.target_url, root_response.text)
+                            discovered_forms, _ = parse_page_html(effective_target_url, root_response.text)
                         param_mod = ParametersModule(
                             http_client=http_client,
-                            target_url=self.target_url,
+                            target_url=effective_target_url,
                             discovered_forms=discovered_forms,
                             seed=self.config.random_seed,
+                            mutation_profile=self.config.mutation_profile,
                         )
                         res = await asyncio.wait_for(
                             param_mod.run(),
@@ -280,14 +294,23 @@ class WebScanEngine:
                         else:
                             for cid, entry in coverage_map.items():
                                 if entry.module == ModuleId.PARAMETERS:
-                                    entry.status = CheckStatus.COMPLETED
+                                    # Honor known coverage gaps honestly (F-02)
+                                    desc = next((c for c in CAPABILITIES_CATALOG.checks if c.check_id == cid), None)
+                                    if desc and desc.coverage_gap:
+                                        entry.status = CheckStatus.INCONCLUSIVE
+                                        entry.reason_code = "COVERAGE_GAP_PRESERVED"
+                                    elif http_client.is_budget_exhausted:
+                                        entry.status = CheckStatus.SKIPPED
+                                        entry.reason_code = "BUDGET_EXHAUSTED"
+                                    else:
+                                        entry.status = CheckStatus.COMPLETED
 
                     elif mod == ModuleId.HEADER_PROBES:
                         if not discovered_links and root_response:
-                            _, discovered_links = parse_page_html(self.target_url, root_response.text)
+                            _, discovered_links = parse_page_html(effective_target_url, root_response.text)
                         header_probes_mod = HeaderProbesModule(
                             http_client=http_client,
-                            target_url=self.target_url,
+                            target_url=effective_target_url,
                             discovered_links=discovered_links,
                         )
                         res = await asyncio.wait_for(
@@ -300,12 +323,16 @@ class WebScanEngine:
 
                         for cid, entry in coverage_map.items():
                             if entry.module == ModuleId.HEADER_PROBES:
-                                entry.status = CheckStatus.COMPLETED
+                                if http_client.is_budget_exhausted:
+                                    entry.status = CheckStatus.SKIPPED
+                                    entry.reason_code = "BUDGET_EXHAUSTED"
+                                else:
+                                    entry.status = CheckStatus.COMPLETED
 
                     elif mod == ModuleId.LOAD:
                         load_mod = LoadResilienceModule(
                             http_client=http_client,
-                            target_url=self.target_url,
+                            target_url=effective_target_url,
                             load_config=self.config.load,
                             cancel_event=self.cancel_event,
                         )
@@ -317,7 +344,11 @@ class WebScanEngine:
 
                         for cid, entry in coverage_map.items():
                             if entry.module == ModuleId.LOAD:
-                                entry.status = CheckStatus.COMPLETED
+                                if http_client.is_budget_exhausted:
+                                    entry.status = CheckStatus.SKIPPED
+                                    entry.reason_code = "BUDGET_EXHAUSTED"
+                                else:
+                                    entry.status = CheckStatus.COMPLETED
 
                 except asyncio.CancelledError:
                     final_state = ScanState.CANCELLED
@@ -363,6 +394,14 @@ class WebScanEngine:
             if self.cancel_event.is_set() and final_state != ScanState.CANCELLED:
                 final_state = ScanState.CANCELLED
                 status_reason = "Scan cancelled by operator"
+
+            # Clean up any remaining PENDING entries in coverage_map (F-02)
+            if final_state in (ScanState.CANCELLED, ScanState.FAILED):
+                reason_code = "SCAN_CANCELLED" if final_state == ScanState.CANCELLED else "SCAN_FAILED"
+                for cid, entry in coverage_map.items():
+                    if entry.status == CheckStatus.PENDING:
+                        entry.status = CheckStatus.SKIPPED
+                        entry.reason_code = reason_code
 
         except Exception as fatal_exc:
             logger.exception("Fatal scan engine error: %s", fatal_exc)

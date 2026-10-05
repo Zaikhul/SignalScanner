@@ -66,6 +66,9 @@ class ReconModule:
                 "header_names": list(root_resp.headers.keys()),
                 "decompressed_bytes": len(root_resp.text.encode("utf-8")),
                 "body_truncated": root_resp.truncated,
+                "target_ip": getattr(root_resp, "target_ip", None),
+                "dns_candidates": getattr(root_resp, "dns_candidates", []),
+                "peer_ip": getattr(root_resp, "peer_ip", None),
             },
         })
 
@@ -103,7 +106,7 @@ class ReconModule:
                 "severity": "info",
                 "source_severity": "info",
                 "severity_reason": f"WAF detected: {waf_detected}",
-                "confidence": "confirmed_configuration",
+                "confidence": "suspected",
                 "title": f"Web Application Firewall Active ({waf_detected})",
                 "description": "Target is protected by a Web Application Firewall.",
                 "remediation": "Maintain updated rulesets on WAF deployment.",
@@ -207,7 +210,7 @@ class ReconModule:
                 "severity": "info",
                 "source_severity": "info",
                 "severity_reason": f"Content Management System identified: {cms_detected}",
-                "confidence": "confirmed_configuration",
+                "confidence": "suspected",
                 "title": f"CMS Platform Detected ({cms_detected})",
                 "description": f"Target was identified as running {cms_detected}.",
                 "remediation": "Keep all CMS core files and plugins patched to latest security revisions.",
@@ -239,9 +242,35 @@ class ReconModule:
                 and abs(len(p_resp.text) - baseline_404_len) < 50
             )
 
+            # Check for redirect to login or SPA catch-all (F09)
+            final_path = urlsplit(str(p_resp.url)).path.lower()
+            is_login_redirect = any(lp in final_path for lp in ("/login", "/signin", "/auth", "/session", "/users/sign_in"))
+            content_type = p_resp.headers.get("content-type", "").lower()
+            text_head = p_resp.text[:300].lower()
+            is_html = "text/html" in content_type or "<!doctype html" in text_head or "<html" in text_head
+
+            is_sensitive_file = any(s in path_entry for s in (".env", ".git", "backup", "sql", "config.json"))
+
+            # Sensitive files returning HTML or redirecting to login should NOT be flagged as exposed files (F09)
+            if is_sensitive_file and (is_login_redirect or (p_resp.status_code == 200 and is_html)):
+                continue
+
             if p_resp.status_code in (200, 403, 405) and not is_soft_404:
-                cat = "SENSITIVE_DIR" if p_resp.status_code == 200 else "DIRECTORY"
-                sev = "high" if (p_resp.status_code == 200 and any(s in path_entry for s in (".env", ".git", "backup", "config", "sql"))) else ("medium" if p_resp.status_code == 200 else "low")
+                if p_resp.status_code == 200:
+                    cat = "SENSITIVE_DIR" if is_sensitive_file else "DIRECTORY"
+                    sev = "high" if is_sensitive_file else "medium"
+                    title = f"Exposed Endpoint: /{path_entry}"
+                    desc = f"The path '/{path_entry}' responded with HTTP 200 OK. Sensitive files or administrative interfaces may be exposed."
+                elif p_resp.status_code == 403:
+                    cat = "PROTECTED_DIR"
+                    sev = "low"
+                    title = f"Protected Endpoint: /{path_entry}"
+                    desc = f"The path '/{path_entry}' responded with HTTP 403 Forbidden (access restricted)."
+                else:
+                    cat = "METHOD_NOT_ALLOWED"
+                    sev = "low"
+                    title = f"Method Not Allowed: /{path_entry}"
+                    desc = f"The path '/{path_entry}' responded with HTTP 405 Method Not Allowed."
 
                 findings.append({
                     "check_id": "recon.path_enumeration",
@@ -251,8 +280,8 @@ class ReconModule:
                     "source_severity": "high" if p_resp.status_code == 200 else "low",
                     "severity_reason": f"Discovered endpoint '{path_entry}' with HTTP status {p_resp.status_code}",
                     "confidence": "confirmed_configuration",
-                    "title": f"Exposed Endpoint: /{path_entry}",
-                    "description": f"The path '/{path_entry}' responded with HTTP {p_resp.status_code}. Sensitive files or admin interfaces may be exposed.",
+                    "title": title,
+                    "description": desc,
                     "remediation": "Restrict access to sensitive files, admin panels, and configuration backups using web server access rules.",
                     "evidence": {
                         "url_display": test_url,

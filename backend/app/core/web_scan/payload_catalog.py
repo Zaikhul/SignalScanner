@@ -17,14 +17,17 @@ SQL_DIAGNOSTIC_PAYLOADS: List[str] = [
     "<svg/onload=ghost_reflection_marker_2026>",
 ]
 
-# Database error reflection signatures
+# Database error reflection signatures (specific error patterns, excluding broad documentation terms)
 DATABASE_ERROR_SIGNATURES: List[str] = [
     "sql syntax",
     "mysql_fetch",
     "native client",
     "unclosed quotation mark",
     "postgresql query",
-    "mongodb",
+    "failed to parse query",
+    "mongoerror",
+    "exception: connect failed",
+    "not valid as a mongo objectid",
     "ora-00933",
     "sqlite3.operationalerror",
     "syntax error near",
@@ -59,8 +62,12 @@ def apply_mutation(payload: str, transform_id: str = "M-00") -> str:
     return func(payload)
 
 
-def get_random_mutated_payload(payload: str, seed: int = 310) -> str:
-    """Deterministically picks one of the 10 transformations using the configured random seed."""
-    rng = random.Random(seed)
-    chosen_id = rng.choice(list(TRANSFORMS.keys()))
+def get_random_mutated_payload(
+    payload: str,
+    seed: int = 310,
+    rng: random.Random | None = None,
+) -> str:
+    """Deterministically picks one of the 10 transformations using the configured random seed or stateful RNG."""
+    active_rng = rng if rng is not None else random.Random(seed)
+    chosen_id = active_rng.choice(list(TRANSFORMS.keys()))
     return apply_mutation(payload, chosen_id)

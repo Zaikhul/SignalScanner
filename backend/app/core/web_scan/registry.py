@@ -319,14 +319,14 @@ def get_capabilities() -> Capabilities:
             "max_concurrency_ceiling": settings.WEB_SCAN_GLOBAL_MAX_CONCURRENCY,
             "per_origin_concurrency_ceiling": settings.WEB_SCAN_PER_ORIGIN_CONCURRENCY,
             "max_body_bytes": settings.WEB_SCAN_MAX_BODY_BYTES,
-            "max_requests_ceiling": 5000,
+            "max_requests_ceiling": 10000000,
             "job_timeout_seconds_ceiling": 3600,
             "discovered_links_ceiling": 10,
         },
         readiness={
             "enabled": settings.WEB_SCANNER_ENABLED,
             "database_ready": True,
-            "http2_ready": True,
+            "http2_ready": False,
             "network_policy_active": True,
         },
     )

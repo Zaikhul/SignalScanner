@@ -25,15 +25,18 @@ class SecurityHeadersModule:
         url_display = redact_url_query_params(self.response.url)
 
         # ── 1. Content-Security-Policy (CSP) ──────────────────────────────
+        content_type = headers.get("content-type", "").lower()
+        is_html_doc = "text/html" in content_type or (not content_type and "<html" in self.response.text[:200].lower())
         csp = headers.get("content-security-policy")
-        if not csp:
+
+        if is_html_doc and not csp:
             findings.append({
                 "check_id": "headers.csp",
                 "category": "security_headers",
                 "source_category": "MISSING_HEADER",
                 "severity": "high",
                 "source_severity": "high",
-                "severity_reason": "Content-Security-Policy header is absent",
+                "severity_reason": "Content-Security-Policy header is absent on HTML document",
                 "confidence": "confirmed_configuration",
                 "title": "Missing Content-Security-Policy Header",
                 "description": "CSP restricts resource loading and significantly mitigates Cross-Site Scripting (XSS) attacks.",
@@ -46,7 +49,7 @@ class SecurityHeadersModule:
                 },
                 "fingerprint": f"headers:csp:missing:{self.domain}",
             })
-        else:
+        elif csp:
             if "unsafe-inline" in csp.lower() or "unsafe-eval" in csp.lower():
                 findings.append({
                     "check_id": "headers.csp",

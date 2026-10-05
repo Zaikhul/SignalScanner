@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 from urllib.parse import urlsplit
 
 from app.core.web_scan.http_client import WebScanHttpClient
+from app.core.web_scan.network_policy import redact_url_query_params
 from app.core.web_scan.payload_catalog import HEADER_DIAGNOSTIC_PROBES
 
 logger = logging.getLogger("signal_scanner.web_scan.header_probes")
@@ -28,42 +29,46 @@ class HeaderProbesModule:
         urls_to_test = self.links if self.links else [self.target_url]
 
         for link in urls_to_test:
+            link_clean = redact_url_query_params(link)
+
             # First obtain link baseline
             base_resp = await self.http.fetch(link, timeout=5.0)
             base_elapsed = base_resp.elapsed_ms if base_resp else 100.0
 
-            # Test headers with safe diagnostic probes
-            h_resp = await self.http.fetch(
-                link,
-                headers=HEADER_DIAGNOSTIC_PROBES,
-                timeout=12.0,  # 12s timeout for header timing check as in V1.0.py
-            )
-            if not h_resp:
-                continue
+            # Test each diagnostic header individually (F07)
+            for h_name, h_payload in HEADER_DIAGNOSTIC_PROBES.items():
+                probe_headers = {h_name: h_payload}
+                h_resp = await self.http.fetch(
+                    link,
+                    headers=probe_headers,
+                    timeout=12.0,  # 12s timeout for header timing check as in V1.0.py
+                )
+                if not h_resp:
+                    continue
 
-            # If delayed by >= 5.0s compared to baseline (and total elapsed >= 5000ms)
-            if h_resp.elapsed_ms >= 5000.0 and (h_resp.elapsed_ms - base_elapsed) >= 4000.0:
-                findings.append({
-                    "check_id": "header_probes.time_based_sql",
-                    "category": "injection_vulnerability",
-                    "source_category": "BLIND_SQLI_HEADER",
-                    "severity": "high",
-                    "source_severity": "high",
-                    "severity_reason": f"Header diagnostic caused delay of {h_resp.elapsed_ms/1000.0:.2f}s (baseline {base_elapsed/1000.0:.2f}s)",
-                    "confidence": "suspected",
-                    "title": f"Potential Blind SQL Injection in HTTP Request Headers ({link})",
-                    "description": "Diagnostic timing stimulus injected into User-Agent/XFF produced a significant response latency increase.",
-                    "remediation": "Sanitize and parameterize all HTTP header inputs before passing them into SQL queries or logging systems.",
-                    "evidence": {
-                        "url_display": link,
-                        "method": "GET",
-                        "status_code": h_resp.status_code,
-                        "elapsed_ms": h_resp.elapsed_ms,
-                        "baseline_elapsed_ms": base_elapsed,
-                        "excerpts": [{"kind": "timing", "value_redacted": f"Elapsed {h_resp.elapsed_ms:.1f}ms on header probe"}],
-                    },
-                    "fingerprint": f"headers:probe:time:{self.domain}:{link}",
-                })
+                # If delayed by >= 5.0s compared to baseline (and total elapsed >= 5000ms)
+                if h_resp.elapsed_ms >= 5000.0 and (h_resp.elapsed_ms - base_elapsed) >= 4000.0:
+                    findings.append({
+                        "check_id": "header_probes.time_based_sql",
+                        "category": "injection_vulnerability",
+                        "source_category": "BLIND_SQLI_HEADER",
+                        "severity": "high",
+                        "source_severity": "high",
+                        "severity_reason": f"Header '{h_name}' diagnostic caused delay of {h_resp.elapsed_ms/1000.0:.2f}s (baseline {base_elapsed/1000.0:.2f}s)",
+                        "confidence": "suspected",
+                        "title": f"Potential Blind SQL Injection in HTTP Header '{h_name}' ({link_clean})",
+                        "description": f"Diagnostic timing stimulus injected into {h_name} header produced a significant response latency increase.",
+                        "remediation": "Sanitize and parameterize all HTTP header inputs before passing them into SQL queries or logging systems.",
+                        "evidence": {
+                            "url_display": link_clean,
+                            "method": "GET",
+                            "status_code": h_resp.status_code,
+                            "elapsed_ms": h_resp.elapsed_ms,
+                            "baseline_elapsed_ms": base_elapsed,
+                            "excerpts": [{"kind": "timing", "value_redacted": f"Elapsed {h_resp.elapsed_ms:.1f}ms on {h_name} probe"}],
+                        },
+                        "fingerprint": f"headers:probe:time:{self.domain}:{link_clean}:{h_name}",
+                    })
 
         return {
             "findings": findings,

@@ -5,6 +5,7 @@ import { Header } from "@/components/layout/Header";
 import { WebScanControls } from "@/components/web-scanner/WebScanControls";
 import { WebScanProgress } from "@/components/web-scanner/WebScanProgress";
 import { WebScanSummary } from "@/components/web-scanner/WebScanSummary";
+import { WebScanGeographyPanel } from "@/components/web-scanner/WebScanGeographyPanel";
 import { WebScanCharts } from "@/components/web-scanner/WebScanCharts";
 import { WebFindingTable } from "@/components/web-scanner/WebFindingTable";
 import { WebFindingDetail } from "@/components/web-scanner/WebFindingDetail";
@@ -95,6 +96,9 @@ export default function WebScannerPage() {
 
         {/* Summary Metric Cards */}
         <WebScanSummary />
+
+        {/* Scan Flow Graph / 3D Globe & Relation List */}
+        <WebScanGeographyPanel />
 
         {/* Descriptive ECharts / Visual Distribution */}
         <WebScanCharts />

@@ -89,9 +89,11 @@ class LoadResilienceModule:
                         legacy_success_lt_500 += 1
                     elif 400 <= sc < 500:
                         http_4xx += 1
-                        legacy_success_lt_500 += 1
                         if sc == 429:
                             rate_limited += 1
+                            legacy_failure += 1
+                        else:
+                            legacy_success_lt_500 += 1
                     elif 500 <= sc < 600:
                         http_5xx += 1
                         legacy_failure += 1

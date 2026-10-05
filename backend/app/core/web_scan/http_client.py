@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import ipaddress
 import logging
 import random
 import time
@@ -30,7 +32,7 @@ USER_AGENTS: List[str] = [
 class RequestBudgetLedger:
     """Authoritative execution ledger tracking all HTTP attempts, outcomes, and budget constraints."""
 
-    def __init__(self, max_requests: int = 10000):
+    def __init__(self, max_requests: int = 10000000):
         self.max_requests = max(1, max_requests)
         self.total_attempted: int = 0
         self.total_succeeded: int = 0
@@ -42,6 +44,8 @@ class RequestBudgetLedger:
         self.total_timeouts: int = 0
         self.total_network_errors: int = 0
         self.total_aborted: int = 0
+        self.rate_limited: int = 0
+        self.total_bytes_received: int = 0
         self._lock = asyncio.Lock()
 
     @property
@@ -55,8 +59,11 @@ class RequestBudgetLedger:
             self.total_attempted += 1
             return True
 
-    def record_success(self, status_code: int) -> None:
+    def record_success(self, status_code: int, bytes_count: int = 0) -> None:
         self.total_succeeded += 1
+        self.total_bytes_received += bytes_count
+        if status_code == 429:
+            self.rate_limited += 1
         if 200 <= status_code < 300:
             self.status_2xx += 1
         elif 300 <= status_code < 400:
@@ -96,6 +103,8 @@ class RequestBudgetLedger:
             "timeouts": self.total_timeouts,
             "network_errors": self.total_network_errors,
             "aborted": self.total_aborted,
+            "rate_limited": self.rate_limited,
+            "bytes_received": self.total_bytes_received,
         }
 
     def to_metrics(self) -> Any:
@@ -108,8 +117,8 @@ class RequestBudgetLedger:
             http_4xx=self.status_4xx,
             http_5xx=self.status_5xx,
             http_other=0,
-            rate_limited=0,
-            bytes_received=0,
+            rate_limited=self.rate_limited,
+            bytes_received=self.total_bytes_received,
         )
 
 
@@ -128,6 +137,10 @@ class WebScanResponse:
         truncated: bool = False,
         body_truncated: Optional[bool] = None,
         set_cookie_headers: Optional[List[str]] = None,
+        target_ip: Optional[str] = None,
+        dns_candidates: Optional[List[str]] = None,
+        peer_ip: Optional[str] = None,
+        source_ip: Optional[str] = None,
     ):
         self.url = url
         self.status_code = status_code
@@ -140,6 +153,10 @@ class WebScanResponse:
         self.elapsed_ms = elapsed_ms
         self.http_version = http_version
         self.truncated = truncated or (body_truncated is True)
+        self.target_ip = target_ip
+        self.dns_candidates = dns_candidates or []
+        self.peer_ip = peer_ip
+        self.source_ip = source_ip
 
     @property
     def body_truncated(self) -> bool:
@@ -161,10 +178,10 @@ class WebScanHttpClient:
         tls_verify: bool = True,
         allow_private: bool = False,
         allow_loopback: bool = False,
-        max_concurrency: int = 10000,
-        per_origin_concurrency: int = 5000,
-        requests_per_second: float = 1000.0,
-        max_requests: int = 10000,
+        max_concurrency: int = 100000,
+        per_origin_concurrency: int = 50000,
+        requests_per_second: float = 10000.0,
+        max_requests: int = 10000000,
         job_timeout_seconds: int = 600,
         scope_rules: Optional[List[Dict[str, Any]]] = None,
         user_agent_profile: str = "source_rotation",
@@ -196,6 +213,7 @@ class WebScanHttpClient:
         self.allow_loopback = allow_loopback
         self.max_concurrency = max_concurrency
         self.per_origin_concurrency = per_origin_concurrency
+        self.requests_per_second = requests_per_second
         self.scope_rules = scope_rules
         self.user_agent_profile = user_agent_profile
         self.fixed_user_agent = fixed_user_agent
@@ -207,12 +225,17 @@ class WebScanHttpClient:
         self.recorded_errors: List[Dict[str, Any]] = []
         self._budget_exhausted_logged: bool = False
 
-        # Semaphores and atomic rate limiter state
-        self.global_semaphore = global_semaphore or asyncio.Semaphore(max_concurrency)
+        # Semaphores and atomic rate limiter state (F-04)
+        self.global_semaphore = global_semaphore
+        self.job_semaphore = asyncio.Semaphore(max_concurrency)
         self.origin_semaphores: Dict[str, asyncio.Semaphore] = {}
         self.min_interval = 1.0 / max(0.5, requests_per_second)
         self._rate_lock = asyncio.Lock()
         self._origin_next_slot: Dict[str, float] = {}
+
+        # Stateful PRNG for user agent selection (F-14)
+        random_seed = getattr(config, "random_seed", 310) if config else kwargs.get("random_seed", 310)
+        self._ua_rng = random.Random(random_seed)
 
         # Active tasks tracking for immediate cancellation
         self._in_flight_tasks: Set[asyncio.Task] = set()
@@ -243,7 +266,7 @@ class WebScanHttpClient:
     def _get_user_agent(self) -> str:
         if self.user_agent_profile == "fixed" and self.fixed_user_agent:
             return self.fixed_user_agent
-        return random.choice(USER_AGENTS)
+        return self._ua_rng.choice(USER_AGENTS)
 
     def _get_origin_key(self, url: str) -> str:
         parts = urlsplit(url)
@@ -330,6 +353,7 @@ class WebScanHttpClient:
         current_url = url
         current_method = method
         redirect_count = 0
+        last_status: Optional[int] = None
 
         while True:
             # 1. Deadline check
@@ -385,22 +409,8 @@ class WebScanHttpClient:
                     self.ledger.record_failure("scope_violation")
                     return None
 
-            # 5. Origin rate limiting
+            # 5. Origin rate limiting and concurrency control
             origin = self._get_origin_key(current_url)
-            if not await self._schedule_rate_slot(origin):
-                if self.job_deadline is not None and time.monotonic() >= self.job_deadline:
-                    safe_url = redact_url_query_params(current_url)
-                    logger.warning("Job deadline reached for %s", safe_url)
-                    self.recorded_errors.append({
-                        "stage": "request",
-                        "code": "JOB_DEADLINE_EXCEEDED",
-                        "message": f"Job deadline reached for {safe_url}",
-                    })
-                    self.ledger.record_failure("timeout")
-                else:
-                    self.ledger.record_failure("aborted")
-                return None
-
             if origin not in self.origin_semaphores:
                 self.origin_semaphores[origin] = asyncio.Semaphore(self.per_origin_concurrency)
 
@@ -417,151 +427,194 @@ class WebScanHttpClient:
 
             req_timeout = timeout if timeout is not None else self.timeout_seconds
 
-            async with self.global_semaphore:
-                async with origin_sem:
-                    if self.cancel_event and self.cancel_event.is_set():
-                        self.ledger.record_failure("aborted")
-                        return None
+            sem_ctx = self.global_semaphore if self.global_semaphore is not None else contextlib.nullcontext()
+            async with self.job_semaphore:
+                async with sem_ctx:
+                    async with origin_sem:
+                        # Schedule rate slot inside semaphore context so release doesn't burst (F-04)
+                        if not await self._schedule_rate_slot(origin):
+                            if self.job_deadline is not None and time.monotonic() >= self.job_deadline:
+                                safe_url = redact_url_query_params(current_url)
+                                logger.warning("Job deadline reached for %s", safe_url)
+                                self.recorded_errors.append({
+                                    "stage": "request",
+                                    "code": "JOB_DEADLINE_EXCEEDED",
+                                    "message": f"Job deadline reached for {safe_url}",
+                                })
+                                self.ledger.record_failure("timeout")
+                            else:
+                                self.ledger.record_failure("aborted")
+                            return None
 
-                    if self.job_deadline is not None and time.monotonic() >= self.job_deadline:
-                        safe_url = redact_url_query_params(current_url)
-                        logger.warning("Job deadline reached for %s", safe_url)
-                        self.recorded_errors.append({
-                            "stage": "request",
-                            "code": "JOB_DEADLINE_EXCEEDED",
-                            "message": f"Job deadline reached for {safe_url}",
-                        })
-                        self.ledger.record_failure("timeout")
-                        return None
-
-                    if self.job_deadline is not None:
-                        remaining_time = max(0.001, self.job_deadline - time.monotonic())
-                        req_timeout = min(req_timeout, remaining_time)
-
-                    start_time = time.monotonic()
-                    try:
-                        req = self._client.build_request(
-                            method=current_method,
-                            url=current_url,
-                            params=params if redirect_count == 0 else None,
-                            data=data if redirect_count == 0 else None,
-                            json=json_data if redirect_count == 0 else None,
-                            headers=req_headers,
-                            timeout=req_timeout,
-                        )
                         if self.cancel_event and self.cancel_event.is_set():
                             self.ledger.record_failure("aborted")
                             return None
 
-                        resp = await self._client.send(req, stream=True)
-                        elapsed_ms = (time.monotonic() - start_time) * 1000.0
+                        if self.job_deadline is not None and time.monotonic() >= self.job_deadline:
+                            safe_url = redact_url_query_params(current_url)
+                            logger.warning("Job deadline reached for %s", safe_url)
+                            self.recorded_errors.append({
+                                "stage": "request",
+                                "code": "JOB_DEADLINE_EXCEEDED",
+                                "message": f"Job deadline reached for {safe_url}",
+                            })
+                            self.ledger.record_failure("timeout")
+                            return None
 
-                        max_bytes = settings.WEB_SCAN_MAX_BODY_BYTES
-                        body_chunks = []
-                        bytes_read = 0
-                        truncated = False
+                        if self.job_deadline is not None:
+                            remaining_time = max(0.001, self.job_deadline - time.monotonic())
+                            req_timeout = min(req_timeout, remaining_time)
 
+                        start_time = time.monotonic()
                         try:
-                            async for chunk in resp.aiter_bytes():
-                                if self.cancel_event and self.cancel_event.is_set():
-                                    self.ledger.record_failure("aborted")
-                                    return None
-                                if self.job_deadline is not None and time.monotonic() >= self.job_deadline:
-                                    self.ledger.record_failure("timeout")
-                                    return None
-                                if bytes_read + len(chunk) > max_bytes:
-                                    allowed_slice = chunk[: max_bytes - bytes_read]
-                                    body_chunks.append(allowed_slice)
-                                    truncated = True
-                                    break
-                                body_chunks.append(chunk)
-                                bytes_read += len(chunk)
-                        finally:
-                            await resp.aclose()
-                        raw_body = b"".join(body_chunks)
-                        encoding = resp.encoding or "utf-8"
-                        try:
-                            text = raw_body.decode(encoding, errors="replace")
-                        except Exception:
-                            text = raw_body.decode("utf-8", errors="replace")
+                            # Preserve body on 307 and 308 redirects (F-08)
+                            preserve_body = (redirect_count > 0 and last_status in (307, 308))
+                            req = self._client.build_request(
+                                method=current_method,
+                                url=current_url,
+                                params=params if redirect_count == 0 else None,
+                                data=data if (redirect_count == 0 or preserve_body) else None,
+                                json=json_data if (redirect_count == 0 or preserve_body) else None,
+                                headers=req_headers,
+                                timeout=req_timeout,
+                            )
+                            if self.cancel_event and self.cancel_event.is_set():
+                                self.ledger.record_failure("aborted")
+                                return None
 
-                        multi_headers = [(k, v) for k, v in resp.headers.raw]
-                        decoded_multi = [
-                            (k.decode("ascii", errors="replace"), v.decode("latin-1", errors="replace"))
-                            for k, v in multi_headers
-                        ]
+                            resp = await self._client.send(req, stream=True)
 
-                        self.ledger.record_success(resp.status_code)
+                            max_bytes = settings.WEB_SCAN_MAX_BODY_BYTES
+                            body_chunks = []
+                            bytes_read = 0
+                            truncated = False
 
-                        # Handle redirect hop manually
-                        if resp.status_code in (301, 302, 303, 307, 308) and "location" in resp.headers:
-                            if redirect_count < max_redirects:
-                                loc = resp.headers["location"]
-                                base_url = httpx.URL(current_url)
-                                next_url = str(base_url.join(loc))
-                                redirect_count += 1
-                                current_url = next_url
-                                if resp.status_code == 303:
-                                    current_method = "GET"
-                                continue
+                            try:
+                                async for chunk in resp.aiter_bytes():
+                                    if self.cancel_event and self.cancel_event.is_set():
+                                        self.ledger.record_failure("aborted")
+                                        return None
+                                    if self.job_deadline is not None and time.monotonic() >= self.job_deadline:
+                                        self.ledger.record_failure("timeout")
+                                        return None
+                                    if bytes_read + len(chunk) > max_bytes:
+                                        allowed_slice = chunk[: max_bytes - bytes_read]
+                                        body_chunks.append(allowed_slice)
+                                        truncated = True
+                                        break
+                                    body_chunks.append(chunk)
+                                    bytes_read += len(chunk)
+                            finally:
+                                await resp.aclose()
+                            raw_body = b"".join(body_chunks)
+                            # Elapsed time accurately captures headers AND complete body transfer (F-12)
+                            elapsed_ms = (time.monotonic() - start_time) * 1000.0
 
-                        return WebScanResponse(
-                            url=str(resp.url),
-                            status_code=resp.status_code,
-                            headers=dict(resp.headers),
-                            multi_headers=decoded_multi,
-                            text=text,
-                            elapsed_ms=elapsed_ms,
-                            http_version=resp.http_version,
-                            truncated=truncated,
-                        )
+                            encoding = resp.encoding or "utf-8"
+                            try:
+                                text = raw_body.decode(encoding, errors="replace")
+                            except Exception:
+                                text = raw_body.decode("utf-8", errors="replace")
 
-                    except httpx.ConnectTimeout:
-                        safe_url = redact_url_query_params(current_url)
-                        logger.warning("Connection timeout to %s", safe_url)
-                        self.recorded_errors.append({
-                            "stage": "connect",
-                            "code": "CONNECT_TIMEOUT",
-                            "message": f"Connection timed out for {safe_url}",
-                        })
-                        self.ledger.record_failure("timeout")
-                        return None
+                            multi_headers = [(k, v) for k, v in resp.headers.raw]
+                            decoded_multi = [
+                                (k.decode("ascii", errors="replace"), v.decode("latin-1", errors="replace"))
+                                for k, v in multi_headers
+                            ]
 
-                    except httpx.ReadTimeout:
-                        safe_url = redact_url_query_params(current_url)
-                        logger.warning("Read timeout to %s", safe_url)
-                        self.recorded_errors.append({
-                            "stage": "response",
-                            "code": "READ_TIMEOUT",
-                            "message": f"Read timed out for {safe_url}",
-                        })
-                        self.ledger.record_failure("timeout")
-                        return None
+                            self.ledger.record_success(resp.status_code, bytes_count=len(raw_body))
+                            last_status = resp.status_code
 
-                    except httpx.ConnectError as ce:
-                        safe_url = redact_url_query_params(current_url)
-                        logger.warning("Connection error to %s: %s", safe_url, ce)
-                        self.recorded_errors.append({
-                            "stage": "connect",
-                            "code": "CONNECT_ERROR",
-                            "message": f"Cannot connect to {safe_url}: {ce}",
-                        })
-                        self.ledger.record_failure("connect_error")
-                        return None
+                            # Handle redirect hop manually
+                            if resp.status_code in (301, 302, 303, 307, 308) and "location" in resp.headers:
+                                if redirect_count < max_redirects:
+                                    loc = resp.headers["location"]
+                                    base_url = httpx.URL(current_url)
+                                    next_url = str(base_url.join(loc))
+                                    redirect_count += 1
+                                    current_url = next_url
+                                    if resp.status_code in (301, 302, 303):
+                                        current_method = "GET"
+                                    continue
 
-                    except Exception as e:
-                        safe_url = redact_url_query_params(current_url)
-                        err_str = str(e)
-                        code = "TLS_ERROR" if "ssl" in err_str.lower() or "certificate" in err_str.lower() else "HTTP_REQUEST_ERROR"
-                        stage = "tls" if code == "TLS_ERROR" else "request"
-                        logger.debug("HTTP request error for %s (%s): %s", safe_url, code, e)
-                        self.recorded_errors.append({
-                            "stage": stage,
-                            "code": code,
-                            "message": f"{code} for {safe_url}: {e}",
-                        })
-                        self.ledger.record_failure("network_error")
-                        return None
+                            pinned_ip = (
+                                getattr(resp, "extensions", {}).get("pinned_ip")
+                                or req.extensions.get("pinned_ip")
+                            )
+                            approved_ips = (
+                                getattr(resp, "extensions", {}).get("approved_ips")
+                                or req.extensions.get("approved_ips")
+                                or []
+                            )
+                            if not pinned_ip:
+                                parts = urlsplit(str(resp.url))
+                                host = parts.hostname or ""
+                                try:
+                                    ipaddress.ip_address(host)
+                                    pinned_ip = host
+                                except ValueError:
+                                    pass
+
+                            return WebScanResponse(
+                                url=str(resp.url),
+                                status_code=resp.status_code,
+                                headers=dict(resp.headers),
+                                multi_headers=decoded_multi,
+                                text=text,
+                                elapsed_ms=elapsed_ms,
+                                http_version=resp.http_version,
+                                truncated=truncated,
+                                target_ip=pinned_ip,
+                                dns_candidates=approved_ips,
+                                peer_ip=pinned_ip,
+                            )
+
+                        except httpx.ConnectTimeout:
+                            safe_url = redact_url_query_params(current_url)
+                            logger.warning("Connection timeout to %s", safe_url)
+                            self.recorded_errors.append({
+                                "stage": "connect",
+                                "code": "CONNECT_TIMEOUT",
+                                "message": f"Connection timed out for {safe_url}",
+                            })
+                            self.ledger.record_failure("timeout")
+                            return None
+
+                        except httpx.ReadTimeout:
+                            safe_url = redact_url_query_params(current_url)
+                            logger.warning("Read timeout to %s", safe_url)
+                            self.recorded_errors.append({
+                                "stage": "response",
+                                "code": "READ_TIMEOUT",
+                                "message": f"Read timed out for {safe_url}",
+                            })
+                            self.ledger.record_failure("timeout")
+                            return None
+
+                        except httpx.ConnectError as ce:
+                            safe_url = redact_url_query_params(current_url)
+                            logger.warning("Connection error to %s: %s", safe_url, ce)
+                            self.recorded_errors.append({
+                                "stage": "connect",
+                                "code": "CONNECT_ERROR",
+                                "message": f"Cannot connect to {safe_url}: {ce}",
+                            })
+                            self.ledger.record_failure("connect_error")
+                            return None
+
+                        except Exception as e:
+                            safe_url = redact_url_query_params(current_url)
+                            err_str = str(e)
+                            code = "TLS_ERROR" if "ssl" in err_str.lower() or "certificate" in err_str.lower() else "HTTP_REQUEST_ERROR"
+                            stage = "tls" if code == "TLS_ERROR" else "request"
+                            logger.debug("HTTP request error for %s (%s): %s", safe_url, code, e)
+                            self.recorded_errors.append({
+                                "stage": stage,
+                                "code": code,
+                                "message": f"{code} for {safe_url}: {e}",
+                            })
+                            self.ledger.record_failure("network_error")
+                            return None
 
     async def aclose(self) -> None:
         self.abort_in_flight()

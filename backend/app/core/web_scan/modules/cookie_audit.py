@@ -6,7 +6,12 @@ from urllib.parse import urlsplit
 
 from app.core.web_scan.http_client import WebScanResponse
 
-SESSION_NAME_PATTERNS = ("sess", "token", "auth", "id", "jwt", "sid", "login", "ticket")
+SESSION_COOKIE_REGEX = re.compile(
+    r"^(phpsessid|jsessionid|aspsessionid.*|connect\.sid|sid|token|auth|jwt|ticket|id)$|"
+    r"(?:^|[_\-.])(session|sess|auth|token|jwt|ticket)(?:$|[_\-.])|"
+    r"(?:session|user|auth|account)[_\-.]id$",
+    re.IGNORECASE,
+)
 
 
 class CookieAuditModule:
@@ -20,8 +25,7 @@ class CookieAuditModule:
         self.domain = parts.hostname or ""
 
     def _is_session_cookie(self, name: str) -> bool:
-        lower = name.lower()
-        return any(p in lower for p in SESSION_NAME_PATTERNS)
+        return bool(SESSION_COOKIE_REGEX.search(name))
 
     def run(self) -> Dict[str, Any]:
         findings = []

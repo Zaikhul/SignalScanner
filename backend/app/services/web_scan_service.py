@@ -325,31 +325,31 @@ class WebScanService:
                     detail="Geolocation assessment is not permitted by scope grant",
                 )
 
-            # Check budget limits
+            # Check budget limits (F-17)
             grant_budget = scope_record.budget or {}
-            if "max_concurrency" in grant_budget and config.max_concurrency > grant_budget["max_concurrency"]:
+            cfg_fields = req.configuration.model_fields_set if req.configuration else set()
+            if "max_concurrency" in grant_budget and "max_concurrency" in cfg_fields and config.max_concurrency > grant_budget["max_concurrency"]:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"Requested max_concurrency ({config.max_concurrency}) exceeds scope grant budget limit ({grant_budget['max_concurrency']})",
                 )
-            if "per_origin_concurrency" in grant_budget and config.per_origin_concurrency > grant_budget["per_origin_concurrency"]:
+            if "per_origin_concurrency" in grant_budget and "per_origin_concurrency" in cfg_fields and config.per_origin_concurrency > grant_budget["per_origin_concurrency"]:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"Requested per_origin_concurrency ({config.per_origin_concurrency}) exceeds scope grant budget limit ({grant_budget['per_origin_concurrency']})",
                 )
-            if "max_requests" in grant_budget and config.max_requests > grant_budget["max_requests"]:
+            if "max_requests" in grant_budget and "max_requests" in cfg_fields and config.max_requests > grant_budget["max_requests"]:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"Requested max_requests ({config.max_requests}) exceeds scope grant budget limit ({grant_budget['max_requests']})",
                 )
-            if "job_timeout_seconds" in grant_budget and config.job_timeout_seconds > grant_budget["job_timeout_seconds"]:
+            if "job_timeout_seconds" in grant_budget and "job_timeout_seconds" in cfg_fields and config.job_timeout_seconds > grant_budget["job_timeout_seconds"]:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"Requested job_timeout_seconds ({config.job_timeout_seconds}) exceeds scope grant budget limit ({grant_budget['job_timeout_seconds']})",
                 )
             if (
-                req.configuration
-                and "requests_per_second" in req.configuration.model_fields_set
+                "requests_per_second" in cfg_fields
                 and "requests_per_second" in grant_budget
                 and config.requests_per_second > grant_budget["requests_per_second"]
             ):
@@ -399,6 +399,8 @@ class WebScanService:
 
         # Compute effective configuration (intersecting request, grant budget, and server caps)
         eff_config = config.model_dump()
+        eff_config["allow_private"] = allow_private
+        eff_config["allow_loopback"] = allow_loopback
         eff_config["max_concurrency"] = min(
             config.max_concurrency,
             settings.WEB_SCAN_GLOBAL_MAX_CONCURRENCY,

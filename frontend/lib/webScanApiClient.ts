@@ -7,6 +7,7 @@ import {
   ScanObservation,
   ScanSnapshot,
   WebScanEvent,
+  WebScanGeographyResponse,
 } from "./webScanTypes";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
@@ -112,6 +113,10 @@ export const webScanApiClient = {
     query.append("limit", String(params.limit || 50));
     query.append("offset", String(params.offset || 0));
     return request<Page<ScanObservation>>(`/api/v1/web-scans/${scanId}/observations?${query.toString()}`);
+  },
+
+  async getGeography(scanId: string): Promise<WebScanGeographyResponse> {
+    return request<WebScanGeographyResponse>(`/api/v1/web-scans/${scanId}/geography`);
   },
 
   async getEvents(

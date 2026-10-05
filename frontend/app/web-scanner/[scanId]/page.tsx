@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Header } from "@/components/layout/Header";
 import { WebScanStatusBadge } from "@/components/web-scanner/WebScanStatusBadge";
 import { WebScanSummary } from "@/components/web-scanner/WebScanSummary";
+import { WebScanGeographyPanel } from "@/components/web-scanner/WebScanGeographyPanel";
 import { WebScanCharts } from "@/components/web-scanner/WebScanCharts";
 import { WebFindingTable } from "@/components/web-scanner/WebFindingTable";
 import { WebFindingDetail } from "@/components/web-scanner/WebFindingDetail";
@@ -115,6 +116,9 @@ export default function ScanDetailPage({ params }: { params: Promise<{ scanId: s
 
         {/* Summary Metric Cards */}
         <WebScanSummary />
+
+        {/* Scan Flow Graph / 3D Globe & Relation List */}
+        <WebScanGeographyPanel scanId={scanId} />
 
         {/* Deliverables Export Menu */}
         <WebScanExportMenu />

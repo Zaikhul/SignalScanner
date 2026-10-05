@@ -103,13 +103,21 @@ def deduplicate_findings(raw_findings: List[Dict[str, Any]], scan_id: str) -> Li
         else:
             evidence_data = item.get("evidence", {})
             evidence_obj = Evidence(
+                request_id=evidence_data.get("request_id"),
+                observation_ids=evidence_data.get("observation_ids", []),
                 url_display=evidence_data.get("url_display", ""),
                 method=evidence_data.get("method"),
                 status_code=evidence_data.get("status_code"),
                 header_names=evidence_data.get("header_names", []),
                 excerpts=evidence_data.get("excerpts", []),
+                baseline_request_id=evidence_data.get("baseline_request_id"),
+                control_request_ids=evidence_data.get("control_request_ids", []),
                 elapsed_ms=evidence_data.get("elapsed_ms"),
                 baseline_elapsed_ms=evidence_data.get("baseline_elapsed_ms"),
+                body_length=evidence_data.get("body_length"),
+                baseline_body_length=evidence_data.get("baseline_body_length"),
+                body_truncated=evidence_data.get("body_truncated", False),
+                catalog_entry_id=evidence_data.get("catalog_entry_id"),
             )
 
             mod_id = _resolve_finding_module(item)
@@ -160,7 +168,11 @@ def calculate_risk_indices(findings: List[ScanFinding]) -> LegacyIndices:
     # V75 formula: sum of exact weights, capped at 100
     v75_points = 0
     for f in findings:
+        if f.severity == Severity.INFO or f.confidence == Confidence.INCONCLUSIVE:
+            continue
         cat = (f.source_category or f.category or "").upper()
+        if cat in ("STRESS_TEST", "RESILIENCE_INFO", "TECH_INFO"):
+            continue
         v75_points += _V75_WEIGHTS.get(cat, 15)
     v75_score = min(v75_points, 100)
     v75_band = score_to_risk_band(v75_score)
@@ -168,7 +180,11 @@ def calculate_risk_indices(findings: List[ScanFinding]) -> LegacyIndices:
     # V2 formula: from local json_report.py ScanReport.calculate_risk()
     v2_points = 0
     for f in findings:
+        if f.severity == Severity.INFO or f.confidence == Confidence.INCONCLUSIVE:
+            continue
         cat = (f.source_category or f.category or "").upper()
+        if cat in ("STRESS_TEST", "RESILIENCE_INFO", "TECH_INFO"):
+            continue
         v2_points += _V2_WEIGHTS.get(cat, 10)
     v2_score = min(v2_points, 100)
     v2_band = score_to_risk_band(v2_score)

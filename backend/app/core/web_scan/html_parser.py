@@ -6,14 +6,16 @@ from urllib.parse import urljoin, urlsplit
 
 
 class FormField:
-    def __init__(self, name: str, input_type: str):
+    def __init__(self, name: str, input_type: str, value: str = ""):
         self.name = name
         self.input_type = input_type
+        self.value = value
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
             "type": self.input_type,
+            "value": self.value if self.input_type.lower() != "password" else "",
             "secret_value_discarded": self.input_type.lower() == "password",
         }
 
@@ -89,8 +91,9 @@ class WebPageHtmlParser(HTMLParser):
         elif self._inside_form and tag in ("input", "textarea", "select"):
             name = attr_dict.get("name", "").strip()
             input_type = attr_dict.get("type", "text").lower() if tag == "input" else tag
+            val = attr_dict.get("value", "")
             if name:
-                self._current_form_fields.append(FormField(name=name, input_type=input_type))
+                self._current_form_fields.append(FormField(name=name, input_type=input_type, value=val))
 
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() == "form" and self._inside_form:

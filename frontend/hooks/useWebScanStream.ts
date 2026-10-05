@@ -113,6 +113,18 @@ export function useWebScanStream(scanId: string | null, enabled: boolean = true)
           setActiveJob({ ...currentJob, status: "completed" });
         }
         reconcileTerminalData();
+      } else if (type === "cancelled" && payload) {
+        const currentJob = useWebScanStore.getState().activeJob;
+        if (currentJob) {
+          setActiveJob({ ...currentJob, status: "cancelled" });
+        }
+        reconcileTerminalData();
+      } else if (type === "failed" && payload) {
+        const currentJob = useWebScanStore.getState().activeJob;
+        if (currentJob) {
+          setActiveJob({ ...currentJob, status: "failed" });
+        }
+        reconcileTerminalData();
       }
 
       addEvent(data);

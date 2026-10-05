@@ -25,6 +25,9 @@ export function WebScanSummary() {
   const v47Score = legacy?.v47?.value ?? 0;
   const v75Score = legacy?.v75?.value ?? 0;
 
+  const isTerminal = ["completed", "failed", "cancelled"].includes(activeJob?.status || "");
+  const hasRun = Boolean(result) || (isTerminal && findings.length > 0);
+
   return (
     <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
       {/* Findings Breakdown Card */}
@@ -57,14 +60,16 @@ export function WebScanSummary() {
           <ShieldCheck size={16} className="text-zinc-400" />
         </div>
         <div className="flex items-baseline gap-2 mb-2">
-          <span className="text-2xl font-bold font-mono text-zinc-100">{v2Score}</span>
+          <span className="text-2xl font-bold font-mono text-zinc-100">{hasRun ? v2Score : "-"}</span>
           <span className="text-xs text-zinc-400 font-mono">/ 100</span>
         </div>
         <div className="text-xs text-zinc-400">
           Source Band:{" "}
           <span
             className={`font-semibold capitalize ${
-              v2Score >= 70
+              !hasRun
+                ? "text-zinc-500"
+                : v2Score >= 70
                 ? "text-red-400"
                 : v2Score >= 50
                 ? "text-orange-400"
@@ -73,7 +78,7 @@ export function WebScanSummary() {
                 : "text-emerald-400"
             }`}
           >
-            {v2Score >= 70 ? "Critical" : v2Score >= 50 ? "High" : v2Score >= 30 ? "Medium" : "Low"}
+            {!hasRun ? "Not Scanned" : v2Score >= 70 ? "Critical" : v2Score >= 50 ? "High" : v2Score >= 30 ? "Medium" : "Low"}
           </span>
         </div>
       </div>
@@ -87,11 +92,11 @@ export function WebScanSummary() {
         <div className="space-y-1.5 text-xs font-mono">
           <div className="flex justify-between items-center text-zinc-300">
             <span className="text-zinc-400">V47 Index:</span>
-            <span>{v47Score} / 100</span>
+            <span>{hasRun ? `${v47Score} / 100` : "-"}</span>
           </div>
           <div className="flex justify-between items-center text-zinc-300">
             <span className="text-zinc-400">V75 Weight:</span>
-            <span>{v75Score} / 100</span>
+            <span>{hasRun ? `${v75Score} / 100` : "-"}</span>
           </div>
         </div>
       </div>

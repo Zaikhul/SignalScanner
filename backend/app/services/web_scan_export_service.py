@@ -28,6 +28,21 @@ def _sanitize_evidence(evidence: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         sanitized["url_display"] = redact_url_query_params(sanitized["url_display"])
     if "url" in sanitized and isinstance(sanitized["url"], str):
         sanitized["url"] = redact_url_query_params(sanitized["url"])
+    if "excerpts" in sanitized and isinstance(sanitized["excerpts"], list):
+        import re
+        sanitized_excerpts = []
+        for item in sanitized["excerpts"]:
+            if isinstance(item, dict):
+                item_copy = dict(item)
+                if "value_redacted" in item_copy and isinstance(item_copy["value_redacted"], str):
+                    # Redact query parameters in any URLs embedded in excerpts
+                    val = item_copy["value_redacted"]
+                    val = re.sub(r"(https?://[^\s\?]+)\?[^\s'\"\)\]]+", r"\1", val)
+                    item_copy["value_redacted"] = val
+                sanitized_excerpts.append(item_copy)
+            else:
+                sanitized_excerpts.append(item)
+        sanitized["excerpts"] = sanitized_excerpts
     return sanitized
 
 

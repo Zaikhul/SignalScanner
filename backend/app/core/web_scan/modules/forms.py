@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 from app.core.web_scan.html_parser import DiscoveredForm, parse_page_html
 from app.core.web_scan.http_client import WebScanResponse
+from app.core.web_scan.network_policy import redact_url_query_params
 
 
 class FormsModule:
@@ -26,13 +27,14 @@ class FormsModule:
             form_id = f"form_{i}_{form.method.lower()}"
             has_pw = form.has_password_field
             has_csrf = form.has_csrf_token
+            action_display = redact_url_query_params(form.action)
 
             observations.append({
                 "kind": "form",
                 "module": "forms",
                 "data": {
                     "form_id": form_id,
-                    "action_display": form.action,
+                    "action_display": action_display,
                     "method": form.method,
                     "allowed": True,
                     "fields": [f.to_dict() for f in form.fields],
@@ -51,16 +53,16 @@ class FormsModule:
                     "source_severity": "high",
                     "severity_reason": "Form contains password field but uses HTTP GET method",
                     "confidence": "confirmed_configuration",
-                    "title": f"Sensitive Credentials Transmitted via GET ({form.action})",
+                    "title": f"Sensitive Credentials Transmitted via GET ({action_display})",
                     "description": "Submitting password inputs using HTTP GET exposes credentials in browser history, server logs, and Referer headers.",
                     "remediation": "Change the form method to POST and ensure transmission occurs over HTTPS.",
                     "evidence": {
-                        "url_display": form.action,
+                        "url_display": action_display,
                         "method": "GET",
                         "status_code": self.response.status_code,
-                        "excerpts": [{"kind": "text", "value_redacted": f"Form #{i} action={form.action} method=GET with password input"}],
+                        "excerpts": [{"kind": "text", "value_redacted": f"Form #{i} action={action_display} method=GET with password input"}],
                     },
-                    "fingerprint": f"forms:weak_login_get:{self.domain}:{form.action}",
+                    "fingerprint": f"forms:weak_login_get:{self.domain}:{action_display}",
                 })
 
             # Check 2: Missing CSRF Token in POST Form
@@ -73,16 +75,16 @@ class FormsModule:
                     "source_severity": "low",
                     "severity_reason": "State-changing POST form does not contain anti-CSRF token name",
                     "confidence": "suspected",
-                    "title": f"Possible Missing CSRF Token ({form.action})",
+                    "title": f"Possible Missing CSRF Token ({action_display})",
                     "description": "Form uses POST method without a detectable anti-CSRF token (e.g. csrf_token, xsrf_token, _token).",
                     "remediation": "Implement anti-CSRF tokens for all state-changing HTML forms.",
                     "evidence": {
-                        "url_display": form.action,
+                        "url_display": action_display,
                         "method": "POST",
                         "status_code": self.response.status_code,
-                        "excerpts": [{"kind": "text", "value_redacted": f"Form #{i} action={form.action} method=POST without CSRF field"}],
+                        "excerpts": [{"kind": "text", "value_redacted": f"Form #{i} action={action_display} method=POST without CSRF field"}],
                     },
-                    "fingerprint": f"forms:missing_csrf:{self.domain}:{form.action}:{i}",
+                    "fingerprint": f"forms:missing_csrf:{self.domain}:{action_display}:{i}",
                 })
 
         return {

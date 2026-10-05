@@ -85,10 +85,10 @@ class PolicyCheckingTransport(httpx.AsyncBaseTransport):
             allow_private=self.allow_private,
             allow_loopback=self.allow_loopback,
         )
-        request.extensions["pinned_ip"] = approved_ips[0]
-        request.extensions["approved_ips"] = approved_ips
-
-        return await self.wrapped.handle_async_request(request)
+        resp = await self.wrapped.handle_async_request(request)
+        resp.extensions["pinned_ip"] = approved_ips[0]
+        resp.extensions["approved_ips"] = approved_ips
+        return resp
 
     async def aclose(self) -> None:
         await self.wrapped.aclose()

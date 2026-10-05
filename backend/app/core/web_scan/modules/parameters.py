@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from typing import Any, Dict, List
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
@@ -24,10 +25,13 @@ class ParametersModule:
         target_url: str,
         discovered_forms: List[DiscoveredForm],
         seed: int = 310,
+        mutation_profile: str = "aggressive",
     ):
         self.http = http_client
         self.target_url = target_url
         self.seed = seed
+        self.mutation_profile = mutation_profile
+        self.rng = random.Random(seed)
         parts = urlsplit(target_url)
         self.domain = parts.hostname or ""
 
@@ -40,8 +44,8 @@ class ParametersModule:
             if query_pairs:
                 base_action = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
                 query_fields = [
-                    FormField(name=k, input_type="query")
-                    for k, _ in query_pairs
+                    FormField(name=k, input_type="query", value=v)
+                    for k, v in query_pairs
                     if k
                 ]
                 if query_fields:
@@ -58,12 +62,21 @@ class ParametersModule:
         observations = []
         tested_params_count = 0
 
-        # 1. Obtain baseline request
-        base_resp = await self.http.fetch(self.target_url)
-        base_len = len(base_resp.text) if base_resp else 0
-        base_elapsed = base_resp.elapsed_ms if base_resp else 100.0
-
         for form in self.forms:
+            # Baseline data preserving companion fields and initial values (F06)
+            base_data = {f.name: (f.value or "") for f in form.fields if f.name}
+
+            # 1. Obtain endpoint-specific baseline request (F07)
+            if form.method == "POST":
+                base_resp = await self.http.fetch(form.action, method="POST", data=base_data)
+            else:
+                base_resp = await self.http.fetch(form.action, method="GET", params=base_data)
+
+            base_len = len(base_resp.text) if base_resp else 0
+            base_elapsed = base_resp.elapsed_ms if base_resp else 100.0
+            base_text_lower = base_resp.text.lower() if base_resp else ""
+            baseline_errors = {err for err in DATABASE_ERROR_SIGNATURES if err in base_text_lower}
+
             for field in form.fields:
                 param_name = field.name
                 if not param_name or field.input_type == "password":
@@ -72,23 +85,33 @@ class ParametersModule:
                 tested_params_count += 1
 
                 for raw_payload in SQL_DIAGNOSTIC_PAYLOADS:
-                    payload = get_random_mutated_payload(raw_payload, seed=self.seed)
-
-                    # Test GET query or form data
-                    if form.method == "POST":
-                        t_resp = await self.http.fetch(form.action, method="POST", data={param_name: payload})
+                    if self.mutation_profile == "none":
+                        payload = raw_payload
                     else:
-                        t_resp = await self.http.fetch(form.action, method="GET", params={param_name: payload})
+                        payload = get_random_mutated_payload(raw_payload, rng=self.rng)
+
+                    # Preserve companion fields, replacing only the active parameter (F06)
+                    req_payload = dict(base_data)
+                    req_payload[param_name] = payload
+
+                    # Test GET query or POST form data
+                    if form.method == "POST":
+                        t_resp = await self.http.fetch(form.action, method="POST", data=req_payload)
+                    else:
+                        t_resp = await self.http.fetch(form.action, method="GET", params=req_payload)
 
                     if not t_resp:
                         continue
 
                     resp_text_lower = t_resp.text.lower()
 
-                    # ── Check 1: SQL/NoSQL Error Signatures (C-21) ──────────
-                    matched_error = next((err for err in DATABASE_ERROR_SIGNATURES if err in resp_text_lower), None)
+                    # ── Check 1: SQL/NoSQL Error Signatures with Baseline Subtraction (F05) ──
+                    matched_error = next(
+                        (err for err in DATABASE_ERROR_SIGNATURES if err in resp_text_lower and err not in baseline_errors),
+                        None,
+                    )
                     if matched_error:
-                        cat = "SQLI" if "sql" in matched_error or "mysql" in matched_error or "ora" in matched_error else "NOSQL_INJECT"
+                        cat = "SQLI" if any(k in matched_error for k in ("sql", "mysql", "ora", "postgres", "sqlite")) else "NOSQL_INJECT"
                         findings.append({
                             "module": "parameters",
                             "check_id": "parameters.sql_error_matching",
@@ -96,10 +119,10 @@ class ParametersModule:
                             "source_category": cat,
                             "severity": "critical",
                             "source_severity": "critical",
-                            "severity_reason": f"Database error signature '{matched_error}' reflected in response",
+                            "severity_reason": f"Database error signature '{matched_error}' reflected in response (not in baseline)",
                             "confidence": "suspected",
                             "title": f"Potential SQL/NoSQL Error Injection in '{param_name}'",
-                            "description": f"Target reflected a database error message '{matched_error}' when parameter was injected with diagnostic input.",
+                            "description": f"Target reflected a new database error message '{matched_error}' when parameter was injected with diagnostic input.",
                             "remediation": "Use parameterized queries / prepared statements and disable verbose database error messages.",
                             "evidence": {
                                 "url_display": form.action,
@@ -111,31 +134,47 @@ class ParametersModule:
                             "fingerprint": f"params:error:{self.domain}:{form.action}:{param_name}:{matched_error}",
                         })
 
-                    # ── Check 2: XSS Reflection (C-20) ──────────────────────
+                    # ── Check 2: XSS Reflection with HTML Escaping Verification (F05) ────────
                     if "ghost_reflection_marker_2026" in t_resp.text:
-                        findings.append({
-                            "module": "parameters",
-                            "check_id": "parameters.xss_reflection",
-                            "category": "xss_reflection",
-                            "source_category": "XSS",
-                            "severity": "medium",
-                            "source_severity": "medium",
-                            "severity_reason": "Diagnostic marker was reflected verbatim in response without HTML entity encoding",
-                            "confidence": "suspected",
-                            "title": f"Reflected Input in Parameter '{param_name}'",
-                            "description": "The diagnostic marker was reflected unencoded in the HTML response, indicating potential XSS.",
-                            "remediation": "Contextually encode user input before rendering it into HTML documents.",
-                            "evidence": {
-                                "url_display": form.action,
-                                "method": form.method,
-                                "status_code": t_resp.status_code,
-                                "excerpts": [{"kind": "text", "value_redacted": "Diagnostic marker reflected unencoded in body"}],
-                                "elapsed_ms": t_resp.elapsed_ms,
-                            },
-                            "fingerprint": f"params:xss:{self.domain}:{form.action}:{param_name}",
-                        })
+                        raw_tag = "<svg/onload=ghost_reflection_marker_2026>"
+                        escaped_tag = "&lt;svg/onload=ghost_reflection_marker_2026&gt;"
+                        # Flag as XSS only if reflection is unescaped or in an executable context
+                        is_unescaped = (raw_tag in t_resp.text) or ("<" in t_resp.text and escaped_tag not in t_resp.text and "&quot;" not in t_resp.text)
 
-                    # ── Check 3: Time-based delay detection (C-23) ──────────
+                        if is_unescaped:
+                            findings.append({
+                                "module": "parameters",
+                                "check_id": "parameters.xss_reflection",
+                                "category": "xss_reflection",
+                                "source_category": "XSS",
+                                "severity": "medium",
+                                "source_severity": "medium",
+                                "severity_reason": "Diagnostic marker was reflected verbatim in response without HTML entity encoding",
+                                "confidence": "suspected",
+                                "title": f"Reflected Input in Parameter '{param_name}'",
+                                "description": "The diagnostic marker was reflected unencoded in the HTML response, indicating potential XSS.",
+                                "remediation": "Contextually encode user input before rendering it into HTML documents.",
+                                "evidence": {
+                                    "url_display": form.action,
+                                    "method": form.method,
+                                    "status_code": t_resp.status_code,
+                                    "excerpts": [{"kind": "text", "value_redacted": "Diagnostic marker reflected unencoded in body"}],
+                                    "elapsed_ms": t_resp.elapsed_ms,
+                                },
+                                "fingerprint": f"params:xss:{self.domain}:{form.action}:{param_name}",
+                            })
+                        else:
+                            observations.append({
+                                "kind": "xss_reflection_encoded",
+                                "module": "parameters",
+                                "data": {
+                                    "parameter_name": param_name,
+                                    "catalog_entry_id": "xss_marker_properly_escaped",
+                                    "status": "encoded_safe",
+                                },
+                            })
+
+                    # ── Check 3: Time-based delay detection with endpoint baseline (F07) ─────
                     if t_resp.elapsed_ms > (base_elapsed + 4000.0) and any(kw in raw_payload.lower() for kw in ("sleep", "waitfor")):
                         findings.append({
                             "module": "parameters",
@@ -144,10 +183,10 @@ class ParametersModule:
                             "source_category": "SQL_TIME_BASED",
                             "severity": "high",
                             "source_severity": "high",
-                            "severity_reason": f"Response took {t_resp.elapsed_ms/1000.0:.2f}s, exceeding baseline delay (>4.0s)",
+                            "severity_reason": f"Response took {t_resp.elapsed_ms/1000.0:.2f}s, exceeding endpoint baseline delay ({base_elapsed:.1f}ms by >4.0s)",
                             "confidence": "suspected",
                             "title": f"Time-Based Delay Indication in '{param_name}'",
-                            "description": "A time-based diagnostic payload caused a substantial delay compared to the baseline request.",
+                            "description": "A time-based diagnostic payload caused a substantial delay compared to the endpoint baseline request.",
                             "remediation": "Ensure parameter queries are fully parameterized and enforce execution timeouts.",
                             "evidence": {
                                 "url_display": form.action,
@@ -155,30 +194,42 @@ class ParametersModule:
                                 "status_code": t_resp.status_code,
                                 "elapsed_ms": t_resp.elapsed_ms,
                                 "baseline_elapsed_ms": base_elapsed,
-                                "excerpts": [{"kind": "timing", "value_redacted": f"Elapsed {t_resp.elapsed_ms:.1f}ms vs baseline {base_elapsed:.1f}ms"}],
+                                "excerpts": [{"kind": "timing", "value_redacted": f"Elapsed {t_resp.elapsed_ms:.1f}ms vs endpoint baseline {base_elapsed:.1f}ms"}],
                             },
                             "fingerprint": f"params:time:{self.domain}:{form.action}:{param_name}",
                         })
 
-                    # ── Check 4: Boolean comparison length delta (C-24) ─────
-                    if "1=1" in raw_payload and t_resp.status_code == 200 and base_len > 0:
-                        diff = abs(len(t_resp.text) - base_len)
-                        if diff > 50:
-                            observations.append({
-                                "kind": "comparison",
-                                "module": "parameters",
-                                "data": {
-                                    "parameter_name": param_name,
-                                    "catalog_entry_id": "boolean_true_probe",
-                                    "baseline_request_ids": [],
-                                    "probe_request_ids": [],
-                                    "deltas_ms": [t_resp.elapsed_ms - base_elapsed],
-                                    "body_length_deltas": [diff],
-                                    "rule_id": "parameters.boolean_length_delta",
-                                    "conclusion": "suspected",
-                                    "reason_code": "body_length_differs_from_baseline",
-                                },
-                            })
+                    # ── Check 4: Paired Boolean Comparison (True vs False Probes) (F07) ──────
+                    if raw_payload == "' OR 1=1--" and t_resp.status_code == 200:
+                        false_raw = "' OR 1=2--"
+                        false_payload = false_raw if self.mutation_profile == "none" else get_random_mutated_payload(false_raw, rng=self.rng)
+                        false_req_data = dict(base_data)
+                        false_req_data[param_name] = false_payload
+
+                        if form.method == "POST":
+                            false_resp = await self.http.fetch(form.action, method="POST", data=false_req_data)
+                        else:
+                            false_resp = await self.http.fetch(form.action, method="GET", params=false_req_data)
+
+                        if false_resp and false_resp.status_code in (200, 404, 500):
+                            diff_true_false = abs(len(t_resp.text) - len(false_resp.text))
+                            diff_false_base = abs(len(false_resp.text) - base_len)
+                            if diff_true_false > 50 and (diff_false_base > 50 or abs(len(t_resp.text) - base_len) < 50):
+                                observations.append({
+                                    "kind": "comparison",
+                                    "module": "parameters",
+                                    "data": {
+                                        "parameter_name": param_name,
+                                        "catalog_entry_id": "boolean_differential_probe",
+                                        "baseline_request_ids": [],
+                                        "probe_request_ids": [],
+                                        "deltas_ms": [t_resp.elapsed_ms - base_elapsed, false_resp.elapsed_ms - base_elapsed],
+                                        "body_length_deltas": [diff_true_false],
+                                        "rule_id": "parameters.boolean_length_delta",
+                                        "conclusion": "suspected",
+                                        "reason_code": "differential_response_between_boolean_true_and_false",
+                                    },
+                                })
 
         status_str = "completed" if tested_params_count > 0 else "skipped"
         reason_str = None if tested_params_count > 0 else "NO_PARAMETERS_FOUND"
