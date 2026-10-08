@@ -77,7 +77,7 @@ async def verify_collector_auth(
     elif x_api_key:
         token = x_api_key
 
-    valid_keys = [settings.COLLECTOR_API_KEY, settings.API_AUTH_TOKEN]
+    valid_keys = [settings.COLLECTOR_API_KEY, settings.API_AUTH_TOKEN, settings.LOCAL_AGENT_TOKEN]
     is_valid = any(hmac.compare_digest(token, key) for key in valid_keys if token)
 
     if not token or not is_valid:
