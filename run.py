@@ -222,6 +222,8 @@ def main() -> None:
     # 1. Launch Backend
     backend_url = f"http://127.0.0.1:{args.port_backend}"
     env["NEXT_PUBLIC_API_URL"] = backend_url
+    env.setdefault("NEXT_PUBLIC_API_AUTH_TOKEN", env.get("API_AUTH_TOKEN", "signal-scanner-dev-token-2026"))
+    env.setdefault("NEXT_PUBLIC_LOCAL_COLLECTOR_TOKEN", env.get("LOCAL_AGENT_TOKEN", "signal-scanner-local-agent-token-2026"))
     if not args.no_backend:
         log("ORCHESTRATOR", CLR_MAGENTA, f"Launching Backend on {backend_url}...")
         backend_cmd = [

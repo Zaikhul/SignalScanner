@@ -38,13 +38,18 @@ class BatchUploader:
         - Permanent 4xx errors (e.g. 404 session not found): quarantined to dead_letter_batches.
         - 200 OK: triggers offline buffer drainage.
         """
+        pending_count = await buffer_queue.count()
+        if pending_count > 0:
+            # Buffer has backlog: push this batch too to maintain strict FIFO sequence (SS-05)
+            await buffer_queue.push_batch(session_id, batch, retry_count=0)
+            asyncio.create_task(self.drain_offline_buffer())
+            return False
+
         client = await self.get_client()
         try:
             res = await client.post("/api/v1/collector-ingest/batches", json=batch)
             if res.status_code == 200:
                 self._is_online = True
-                # Trigger drain in background
-                asyncio.create_task(self.drain_offline_buffer())
                 return True
             elif res.status_code in (408, 429) or res.status_code >= 500:
                 # Transient server / rate limit error: buffer for retry
@@ -79,67 +84,74 @@ class BatchUploader:
             return
 
         async with self._drain_lock:
-            pending = await buffer_queue.peek_batches(limit=20)
-            if not pending:
-                return
+            while True:
+                pending = await buffer_queue.peek_batches(limit=20)
+                if not pending:
+                    break
 
-            client = await self.get_client()
-            for item in pending:
-                db_id = item["db_id"]
-                session_id = item["session_id"]
-                current_retries = item.get("retry_count", 0)
+                client = await self.get_client()
+                should_halt = False
+                for item in pending:
+                    db_id = item["db_id"]
+                    session_id = item["session_id"]
+                    current_retries = item.get("retry_count", 0)
 
-                try:
-                    res = await client.post("/api/v1/collector-ingest/batches", json=item["batch"])
-                    if res.status_code == 200:
-                        await buffer_queue.remove_batch(db_id)
-                        continue
-                    elif res.status_code in (408, 429) or res.status_code >= 500:
-                        # Transient error: increment retry count
-                        new_retries = await buffer_queue.increment_retry(db_id)
-                        if new_retries >= MAX_RETRIES:
+                    try:
+                        res = await client.post("/api/v1/collector-ingest/batches", json=item["batch"])
+                        if res.status_code == 200:
+                            await buffer_queue.remove_batch(db_id)
+                            continue
+                        elif res.status_code in (408, 429) or res.status_code >= 500:
+                            # Transient error: increment retry count
+                            new_retries = await buffer_queue.increment_retry(db_id)
+                            if new_retries >= MAX_RETRIES:
+                                logger.warning(
+                                    f"Batch {db_id} exceeded MAX_RETRIES ({new_retries}). Moving to dead-letter queue."
+                                )
+                                await buffer_queue.remove_batch(db_id)
+                                await buffer_queue.push_dead_letter(
+                                    session_id=session_id,
+                                    status_code=res.status_code,
+                                    error_reason=f"EXCEEDED_MAX_RETRIES ({new_retries}): {res.text[:200]}",
+                                    batch=item["batch"],
+                                )
+                            # Exponential backoff before stopping drain cycle
+                            backoff_sec = min(0.2 * (2 ** min(new_retries, 5)), 5.0)
+                            await asyncio.sleep(backoff_sec)
+                            should_halt = True
+                            break
+                        else:
+                            # Permanent 4xx error: remove from active retry queue and quarantine
                             logger.warning(
-                                f"Batch {db_id} exceeded MAX_RETRIES ({new_retries}). Moving to dead-letter queue."
+                                f"Drained batch {db_id} rejected with permanent error {res.status_code}. Quarantining to dead-letter."
                             )
                             await buffer_queue.remove_batch(db_id)
                             await buffer_queue.push_dead_letter(
                                 session_id=session_id,
                                 status_code=res.status_code,
-                                error_reason=f"EXCEEDED_MAX_RETRIES ({new_retries}): {res.text[:200]}",
+                                error_reason=res.text[:500],
                                 batch=item["batch"],
                             )
-                        # Exponential backoff before stopping drain cycle
-                        backoff_sec = min(0.2 * (2 ** min(new_retries, 5)), 5.0)
-                        await asyncio.sleep(backoff_sec)
+                            # Continue draining subsequent batches
+                            continue
+                    except Exception as e:
+                        # Network unreachable: increment retry count and stop draining
+                        new_retries = await buffer_queue.increment_retry(db_id)
+                        if new_retries >= MAX_RETRIES:
+                            logger.warning(
+                                f"Batch {db_id} exceeded MAX_RETRIES on network error ({e}). Moving to dead-letter queue."
+                            )
+                            await buffer_queue.remove_batch(db_id)
+                            await buffer_queue.push_dead_letter(
+                                session_id=session_id,
+                                status_code=None,
+                                error_reason=f"EXCEEDED_MAX_RETRIES ({new_retries}): NetworkError {e}",
+                                batch=item["batch"],
+                            )
+                        should_halt = True
                         break
-                    else:
-                        # Permanent 4xx error: remove from active retry queue and quarantine
-                        logger.warning(
-                            f"Drained batch {db_id} rejected with permanent error {res.status_code}. Quarantining to dead-letter."
-                        )
-                        await buffer_queue.remove_batch(db_id)
-                        await buffer_queue.push_dead_letter(
-                            session_id=session_id,
-                            status_code=res.status_code,
-                            error_reason=res.text[:500],
-                            batch=item["batch"],
-                        )
-                        # Continue draining subsequent batches
-                        continue
-                except Exception as e:
-                    # Network unreachable: increment retry count and stop draining
-                    new_retries = await buffer_queue.increment_retry(db_id)
-                    if new_retries >= MAX_RETRIES:
-                        logger.warning(
-                            f"Batch {db_id} exceeded MAX_RETRIES on network error ({e}). Moving to dead-letter queue."
-                        )
-                        await buffer_queue.remove_batch(db_id)
-                        await buffer_queue.push_dead_letter(
-                            session_id=session_id,
-                            status_code=None,
-                            error_reason=f"EXCEEDED_MAX_RETRIES ({new_retries}): NetworkError {e}",
-                            batch=item["batch"],
-                        )
+
+                if should_halt:
                     break
 
     async def close(self) -> None:

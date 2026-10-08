@@ -1,4 +1,5 @@
 import math
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -477,6 +478,10 @@ class ChannelHealthEngine:
         return ConfidenceLevel.LOW, reasons, missing
 
     @classmethod
+    def _generate_rec_id(cls, session_id: str, channel: int) -> str:
+        return f"chr_{session_id[:8]}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{channel}_{uuid.uuid4().hex[:8]}"
+
+    @classmethod
     def generate_recommendation(
         cls,
         session_id: str,
@@ -598,7 +603,7 @@ class ChannelHealthEngine:
 
         return ChannelRecommendationResponse(
             schema_version="1.2",
-            recommendation_id=f"chr_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{primary_item.channel}",
+            recommendation_id=cls._generate_rec_id(session_id, primary_item.channel),
             session_id=session_id,
             input_snapshot_id=snapshot_id,
             algorithm_version=cls.ALGORITHM_VERSION,

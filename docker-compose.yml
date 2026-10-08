@@ -46,6 +46,8 @@ services:
       API_AUTH_TOKEN: ${API_AUTH_TOKEN:-signal-scanner-dev-token-2026}
       COLLECTOR_API_KEY: ${COLLECTOR_API_KEY:-collector-dev-key-2026}
       SECRET_KEY: ${SECRET_KEY:-}
+      TENANT_SALT: ${TENANT_SALT:-}
+      LOCAL_AGENT_TOKEN: ${LOCAL_AGENT_TOKEN:-${NEXT_PUBLIC_LOCAL_COLLECTOR_TOKEN:-signal-scanner-local-agent-token-2026}}
     ports:
       - "${BACKEND_BIND_IP:-127.0.0.1}:8000:8000"
     healthcheck:
@@ -70,6 +72,9 @@ services:
       BACKEND_URL: http://backend:8000
       API_AUTH_TOKEN: ${API_AUTH_TOKEN:-signal-scanner-dev-token-2026}
       COLLECTOR_API_KEY: ${COLLECTOR_API_KEY:-collector-dev-key-2026}
+      SECRET_KEY: ${SECRET_KEY:-}
+      TENANT_SALT: ${TENANT_SALT:-}
+      LOCAL_AGENT_TOKEN: ${LOCAL_AGENT_TOKEN:-${NEXT_PUBLIC_LOCAL_COLLECTOR_TOKEN:-signal-scanner-local-agent-token-2026}}
       LOCAL_AGENT_HOST: 0.0.0.0
       LOCAL_AGENT_PORT: 8001
     ports:

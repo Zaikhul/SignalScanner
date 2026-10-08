@@ -166,6 +166,14 @@ class CollectorDaemon:
             )
 
         elif cmd_type == "pause_scan":
+            if session_id and self._active_session_id and session_id != self._active_session_id:
+                logger.warning(
+                    f"Ignoring pause_scan for session '{session_id}' because active session is '{self._active_session_id}'"
+                )
+                if cmd_id:
+                    await self.ack_command(cmd_id)
+                return
+
             if self._active_adapter:
                 await self._active_adapter.stop()
             if self._scan_task and not self._scan_task.done():
@@ -176,6 +184,14 @@ class CollectorDaemon:
             logger.info(f"Scan paused by backend command for session {session_id}")
 
         elif cmd_type == "resume_scan":
+            if session_id and self._active_session_id and session_id != self._active_session_id:
+                logger.warning(
+                    f"Ignoring resume_scan for session '{session_id}' because active session is '{self._active_session_id}'"
+                )
+                if cmd_id:
+                    await self.ack_command(cmd_id)
+                return
+
             if cmd_id:
                 await self.ack_command(cmd_id)
             self._scan_task = asyncio.create_task(
@@ -191,6 +207,14 @@ class CollectorDaemon:
             logger.info(f"Scan resumed by backend command for session {session_id}")
 
         elif cmd_type == "stop_scan":
+            if session_id and self._active_session_id and session_id != self._active_session_id:
+                logger.warning(
+                    f"Ignoring stop_scan for session '{session_id}' because active session is '{self._active_session_id}'"
+                )
+                if cmd_id:
+                    await self.ack_command(cmd_id)
+                return
+
             if self._active_adapter:
                 await self._active_adapter.stop()
             if self._scan_task and not self._scan_task.done():
@@ -277,6 +301,16 @@ class CollectorDaemon:
 
             await asyncio.sleep(collector_settings.HEARTBEAT_INTERVAL_SECONDS)
 
+    async def _notify_backend_session_failed(self, session_id: str, reason: str) -> None:
+        """Notifies backend that a scan session failed to initialize or execute (SS-07)."""
+        try:
+            url = f"{collector_settings.BACKEND_URL}/api/v1/sessions/{session_id}/fail"
+            headers = self._headers()
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                await client.post(url, json={"reason": reason}, headers=headers)
+        except Exception as e:
+            logger.warning(f"Could not notify backend of session {session_id} failure: {e}")
+
     async def run_scan(
         self,
         session_id: str,
@@ -286,51 +320,54 @@ class CollectorDaemon:
         parameters: Optional[Dict[str, Any]] = None,
         duration_seconds: Optional[int] = None,
     ):
-        """Runs a continuous scan stream with Radio Mutex coordination."""
+        """Runs a continuous scan stream with Radio Mutex coordination and guaranteed state cleanup."""
         self._active_session_id = session_id
+        adapter = None
 
-        if use_mock:
-            adapter = MockSignalAdapter(mode=mode)
-        else:
-            if mode == "wifi":
-                if collector_settings.PLATFORM == "windows":
-                    adapter = WindowsWiFiAdapter()
-                else:
-                    raise RuntimeError("Native Windows WiFi Adapter is only supported on Windows. Run with --mock for virtual scan.")
-            elif mode == "bluetooth":
-                adapter = BleakSignalAdapter()
-            elif mode == "radio":
-                adapter = SoapySDRSignalAdapter()
-            else:
-                adapter = MockSignalAdapter(mode=mode)
-
-        self._active_adapter = adapter
-
-        radio_cfg = (parameters or {}).get("radio_config") or {}
-        dur_sec = duration_seconds or (parameters or {}).get("duration_seconds")
-        current_seq = self._session_sequences.get(session_id, 0)
-        config = ScanConfig(
-            session_id=session_id,
-            sample_interval_ms=sample_interval_ms,
-            duration_seconds=dur_sec,
-            initial_sequence=current_seq,
-            source_type=(parameters or {}).get("source_type") or "collector",
-            center_frequency_hz=(parameters or {}).get("frequency_hz") or radio_cfg.get("center_frequency_hz", 433920000),
-            span_hz=(parameters or {}).get("span_hz") or radio_cfg.get("span_hz", 2000000),
-            sample_rate_hz=(parameters or {}).get("sample_rate_hz") or radio_cfg.get("sample_rate_hz", 2048000),
-            gain_db=(parameters or {}).get("gain_db") if "gain_db" in (parameters or {}) else radio_cfg.get("gain_db", 20.0),
-            fft_size=(parameters or {}).get("fft_size") or radio_cfg.get("fft_size") or radio_cfg.get("fft_bins", 1024),
-        )
-
-        val_res = await adapter.validate(config)
-        if not val_res.is_valid:
-            raise RuntimeError(f"Adapter validation error for {mode}: {val_res.error_message}")
-
-        logger.info(f"Starting {mode} scan on session {session_id} (mock={use_mock})")
-        await radio_mutex.notify_scan_started()
-
-        start_mono = asyncio.get_event_loop().time()
         try:
+            if use_mock:
+                adapter = MockSignalAdapter(mode=mode)
+            else:
+                if mode == "wifi":
+                    if collector_settings.PLATFORM == "windows":
+                        adapter = WindowsWiFiAdapter()
+                    else:
+                        raise RuntimeError(
+                            "Native Windows WiFi Adapter is only supported on Windows. Run with --mock for virtual scan."
+                        )
+                elif mode == "bluetooth":
+                    adapter = BleakSignalAdapter()
+                elif mode == "radio":
+                    adapter = SoapySDRSignalAdapter()
+                else:
+                    raise RuntimeError(f"Unsupported physical mode '{mode}'. Run with --mock for virtual scan.")
+
+            self._active_adapter = adapter
+
+            radio_cfg = (parameters or {}).get("radio_config") or {}
+            dur_sec = duration_seconds or (parameters or {}).get("duration_seconds")
+            current_seq = self._session_sequences.get(session_id, 0)
+            config = ScanConfig(
+                session_id=session_id,
+                sample_interval_ms=sample_interval_ms,
+                duration_seconds=dur_sec,
+                initial_sequence=current_seq,
+                source_type=(parameters or {}).get("source_type") or "collector",
+                center_frequency_hz=(parameters or {}).get("frequency_hz") or radio_cfg.get("center_frequency_hz", 433920000),
+                span_hz=(parameters or {}).get("span_hz") or radio_cfg.get("span_hz", 2000000),
+                sample_rate_hz=(parameters or {}).get("sample_rate_hz") or radio_cfg.get("sample_rate_hz", 2048000),
+                gain_db=(parameters or {}).get("gain_db") if "gain_db" in (parameters or {}) else radio_cfg.get("gain_db", 20.0),
+                fft_size=(parameters or {}).get("fft_size") or radio_cfg.get("fft_size") or radio_cfg.get("fft_bins", 1024),
+            )
+
+            val_res = await adapter.validate(config)
+            if not val_res.is_valid:
+                raise RuntimeError(f"Adapter validation error for {mode}: {val_res.error_message}")
+
+            logger.info(f"Starting {mode} scan on session {session_id} (mock={use_mock})")
+            await radio_mutex.notify_scan_started()
+
+            start_mono = asyncio.get_event_loop().time()
             async for batch in adapter.start(config):
                 if not self._running:
                     break
@@ -344,9 +381,14 @@ class CollectorDaemon:
                 await uploader.send_batch(session_id, batch)
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            logger.error(f"Scan failed for session {session_id}: {e}")
+            asyncio.create_task(self._notify_backend_session_failed(session_id, str(e)))
+            raise
         finally:
             await radio_mutex.notify_scan_stopped()
-            await adapter.stop()
+            if adapter:
+                await adapter.stop()
             self._active_adapter = None
             self._active_session_id = None
             logger.info(f"Scan stream stopped for session {session_id}")
@@ -358,7 +400,12 @@ class CollectorDaemon:
         self._active_assoc_id = assoc_req.association_id
         await radio_mutex.acquire_for_association(ssid=assoc_req.ssid)
 
-        adapter = MockAssociationAdapter() if (use_mock or collector_settings.PLATFORM != "windows") else WindowsWiFiAssociationAdapter()
+        if use_mock:
+            adapter = MockAssociationAdapter()
+        else:
+            if collector_settings.PLATFORM != "windows":
+                raise RuntimeError("WiFi association hardware adapter is only supported on Windows. Run with --mock for virtual association.")
+            adapter = WindowsWiFiAssociationAdapter()
         self._assoc_adapter = adapter
 
         try:
@@ -416,7 +463,7 @@ class CollectorDaemon:
         self, association_id: str, session_id: str, prefix: str, gateway: Optional[str] = None, use_mock: bool = False
     ):
         """Executes bounded discovery on attached LAN prefix."""
-        inv_adapter = MockLanInventoryAdapter() if (use_mock or collector_settings.PLATFORM != "windows") else lan_inventory_engine
+        inv_adapter = MockLanInventoryAdapter() if use_mock else lan_inventory_engine
         bound = InventoryBound(
             interface_name="Wi-Fi",
             attached_prefix=prefix,

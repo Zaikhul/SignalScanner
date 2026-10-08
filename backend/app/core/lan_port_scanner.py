@@ -46,11 +46,22 @@ DEFAULT_LAN_PORTS: List[int] = [
 # Disallowed targets for SSRF and safety preservation
 METADATA_IP = "169.254.169.254"
 
+RFC1918_NETWORKS = [
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+]
 
-def validate_lan_target(ip_str: str, attached_prefix: Optional[str] = None) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+
+def validate_lan_target(
+    ip_str: str,
+    attached_prefix: Optional[str] = None,
+    allow_loopback: bool = False,
+) -> ipaddress.IPv4Address:
     """
-    Validates that a target IP is strictly a private LAN host within the permitted prefix.
-    Rejects public internet, cloud metadata, multicast, and out-of-scope targets.
+    Validates that a target IP is strictly a private RFC 1918 LAN host within the permitted prefix.
+    Rejects public internet, cloud metadata, link-local, loopback, multicast, and out-of-scope targets.
+    Fails safely if attached_prefix is malformed or missing.
     """
     if not ip_str or not isinstance(ip_str, str):
         raise ValueError("Target IP must be a non-empty string")
@@ -61,6 +72,10 @@ def validate_lan_target(ip_str: str, attached_prefix: Optional[str] = None) -> i
     except ValueError as e:
         raise ValueError(f"Invalid IP address format: '{ip_trimmed}'") from e
 
+    # Confine to IPv4
+    if not isinstance(ip_obj, ipaddress.IPv4Address):
+        raise ValueError(f"TARGET_INVALID: Only IPv4 addresses are supported, got '{ip_trimmed}'")
+
     # 1. Reject public internet IPs
     if ip_obj.is_global:
         raise ValueError(
@@ -68,30 +83,57 @@ def validate_lan_target(ip_str: str, attached_prefix: Optional[str] = None) -> i
             "Port scanning is strictly confined to authorized private LAN hosts."
         )
 
-    # 2. Reject cloud metadata and link-local multicast
+    # 2. Reject cloud metadata and link-local addresses
     if str(ip_obj) == METADATA_IP:
         raise ValueError(f"TARGET_FORBIDDEN: Cloud metadata IP '{METADATA_IP}' is blocked.")
+
+    if ip_obj.is_link_local:
+        raise ValueError(f"TARGET_LINK_LOCAL_REJECTED: Link-local address '{ip_trimmed}' is not permitted.")
 
     if ip_obj.is_multicast or ip_obj.is_unspecified or ip_obj.is_reserved:
         raise ValueError(f"TARGET_INVALID: Special address '{ip_trimmed}' is not a scannable host.")
 
-    # 3. Must be private or loopback (for local testing/diagnostics)
-    if not (ip_obj.is_private or ip_obj.is_loopback):
-        raise ValueError(f"TARGET_NOT_PRIVATE: IP '{ip_trimmed}' is not an RFC 1918 private address.")
+    # 3. Reject loopback unless explicitly allowed in controlled diagnostics
+    if ip_obj.is_loopback:
+        if not allow_loopback:
+            raise ValueError(f"TARGET_LOOPBACK_REJECTED: Loopback address '{ip_trimmed}' is not permitted.")
 
-    # 4. If attached_prefix is provided, target must be inside attached_prefix
-    if attached_prefix:
-        net_obj = None
+    # 4. Enforce RFC 1918 private ranges
+    if not (allow_loopback and ip_obj.is_loopback):
+        is_rfc1918 = any(ip_obj in net for net in RFC1918_NETWORKS)
+        if not is_rfc1918:
+            raise ValueError(f"TARGET_NOT_RFC1918: IP '{ip_trimmed}' is not an RFC 1918 private LAN address.")
+
+    # 5. If attached_prefix is provided, strictly enforce membership and prefix validity
+    if attached_prefix is not None:
+        p_str = attached_prefix.strip()
+        if not p_str:
+            raise ValueError("MISSING_ATTACHED_PREFIX: Attached subnet prefix cannot be empty.")
+
         try:
-            net_obj = ipaddress.ip_network(attached_prefix, strict=False)
+            net_obj = ipaddress.ip_network(p_str, strict=False)
         except ValueError as e:
-            logger.warning(f"Malformed attached prefix '{attached_prefix}': {e}")
+            raise ValueError(f"INVALID_ATTACHED_PREFIX: Malformed attached prefix '{p_str}': {e}") from e
 
-        if net_obj is not None:
-            if ip_obj not in net_obj and not ip_obj.is_loopback:
+        if net_obj.version != 4:
+            raise ValueError(f"INVALID_ATTACHED_PREFIX: Only IPv4 prefixes are supported, got '{p_str}'")
+
+        if not (allow_loopback and net_obj.is_loopback):
+            if not any(net_obj.subnet_of(rfc) for rfc in RFC1918_NETWORKS):
                 raise ValueError(
-                    f"TARGET_OUT_OF_SUBNET: Target '{ip_trimmed}' is outside attached prefix '{attached_prefix}'."
+                    f"ATTACHED_PREFIX_NOT_RFC1918: Prefix '{p_str}' is not within RFC 1918 private ranges."
                 )
+
+        if ip_obj not in net_obj:
+            raise ValueError(
+                f"TARGET_OUT_OF_SUBNET: Target '{ip_trimmed}' is outside attached prefix '{p_str}'."
+            )
+
+        # Reject subnet network address and broadcast address
+        if ip_obj == net_obj.network_address or (net_obj.num_addresses > 2 and ip_obj == net_obj.broadcast_address):
+            raise ValueError(
+                f"TARGET_SUBNET_BOUNDARY: IP '{ip_trimmed}' is a subnet boundary (network or broadcast address)."
+            )
 
     return ip_obj
 
@@ -158,12 +200,13 @@ class LanPortScanner:
         timeout: Optional[float] = None,
         concurrency: Optional[int] = None,
         attached_prefix: Optional[str] = None,
+        allow_loopback: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Executes bounded port scan on validated LAN target.
         """
         # Strict validation gate
-        validate_lan_target(ip, attached_prefix=attached_prefix)
+        validate_lan_target(ip, attached_prefix=attached_prefix, allow_loopback=allow_loopback)
 
         ports_to_scan = sorted(list(set(ports))) if ports else DEFAULT_LAN_PORTS
         # Clamp ports list to a maximum of 50 ports per request

@@ -82,6 +82,47 @@ class WLAN_BSS_LIST(ctypes.Structure):
     ]
 
 
+class WLAN_AVAILABLE_NETWORK(ctypes.Structure):
+    _fields_ = [
+        ("strProfileName", ctypes.c_wchar * 256),
+        ("dot11Ssid", DOT11_SSID),
+        ("dot11BssType", wintypes.DWORD),
+        ("uNumberOfBssids", wintypes.ULONG),
+        ("bNetworkConnectable", wintypes.BOOL),
+        ("wlanNotConnectableReason", wintypes.DWORD),
+        ("uNumberOfPhyTypes", wintypes.ULONG),
+        ("dot11PhyTypes", wintypes.DWORD * 8),
+        ("bMorePhyTypes", wintypes.BOOL),
+        ("wlanSignalQuality", wintypes.ULONG),
+        ("bSecurityEnabled", wintypes.BOOL),
+        ("dot11DefaultAuthAlgorithm", wintypes.DWORD),
+        ("dot11DefaultCipherAlgorithm", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("dwReserved", wintypes.DWORD),
+    ]
+
+
+class WLAN_AVAILABLE_NETWORK_LIST(ctypes.Structure):
+    _fields_ = [
+        ("dwTotalSize", wintypes.DWORD),
+        ("dwNumberOfItems", wintypes.DWORD),
+        ("Network", WLAN_AVAILABLE_NETWORK * 1),
+    ]
+
+
+DOT11_AUTH_ALGO_MAP: Dict[int, str] = {
+    1: "Open",
+    2: "WEP",
+    3: "WPA-Enterprise",
+    4: "WPA-Personal",
+    6: "WPA2-Enterprise",
+    7: "WPA2-Personal",
+    8: "WPA3-Enterprise",
+    9: "WPA3-Personal",
+    10: "Enhanced Open",
+}
+
+
 class WindowsWiFiAdapter(SignalAdapter):
     def __init__(self):
         self._running = False
@@ -238,6 +279,35 @@ class WindowsWiFiAdapter(SignalAdapter):
                         # Trigger scan (ignore error if throttled by driver)
                         self._wlan_lib.WlanScan(client_handle, ctypes.byref(guid), None, None, None)
 
+                        # Query available network list to extract accurate WLAN auth algorithms (SS-12)
+                        ssid_auth_map = {}
+                        p_net_list = ctypes.c_void_p()
+                        net_res = self._wlan_lib.WlanGetAvailableNetworkList(
+                            client_handle, ctypes.byref(guid), 2, None, ctypes.byref(p_net_list)
+                        )
+                        if net_res == 0:
+                            try:
+                                net_list = ctypes.cast(p_net_list, ctypes.POINTER(WLAN_AVAILABLE_NETWORK_LIST)).contents
+                                net_entry_ptr = ctypes.cast(ctypes.addressof(net_list.Network), ctypes.POINTER(WLAN_AVAILABLE_NETWORK))
+                                for n_idx in range(net_list.dwNumberOfItems):
+                                    n_entry = net_entry_ptr[n_idx]
+                                    n_ssid_len = n_entry.dot11Ssid.uSSIDLength
+                                    n_ssid_bytes = n_entry.dot11Ssid.ucSSID[:n_ssid_len]
+                                    try:
+                                        n_ssid_str = n_ssid_bytes.decode("utf-8")
+                                    except UnicodeDecodeError:
+                                        n_ssid_str = n_ssid_bytes.decode("cp1252", errors="replace")
+
+                                    algo_id = int(n_entry.dot11DefaultAuthAlgorithm)
+                                    sec_enabled = bool(n_entry.bSecurityEnabled)
+                                    if not sec_enabled or algo_id == 1:
+                                        auth_label = "Open"
+                                    else:
+                                        auth_label = DOT11_AUTH_ALGO_MAP.get(algo_id, "WPA2-Personal")
+                                    ssid_auth_map[n_ssid_str] = auth_label
+                            finally:
+                                self._wlan_lib.WlanFreeMemory(p_net_list)
+
                         # Query BSS list
                         p_bss_list = ctypes.c_void_p()
                         bss_res = self._wlan_lib.WlanGetNetworkBssList(
@@ -275,6 +345,7 @@ class WindowsWiFiAdapter(SignalAdapter):
                                         band = "2.4GHz"
                                         channel = 1
 
+                                    auth_type = ssid_auth_map.get(ssid_str, "Unknown")
                                     results.append({
                                         "ssid": ssid_str if ssid_str else "Hidden Network",
                                         "bssid": bssid_str,
@@ -282,7 +353,7 @@ class WindowsWiFiAdapter(SignalAdapter):
                                         "channel": channel,
                                         "band": band,
                                         "freq_hz": freq_hz,
-                                        "auth": "WPA2/WPA3",
+                                        "auth": auth_type,
                                         "radio_type": "802.11ax/ac/n",
                                         "is_native": True,
                                     })

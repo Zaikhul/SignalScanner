@@ -33,11 +33,13 @@ export function WifiCredentialModal() {
 
   const passwordInputRef = useRef<HTMLInputElement>(null);
 
-  // Security type inspection
-  const rawSecurity = targetToAssociate?.extra?.security || targetToAssociate?.extra?.auth || "WPA2";
+  // Security type inspection (SS-12)
+  const rawSecurity = (targetToAssociate?.extra?.security || targetToAssociate?.extra?.auth || "").trim();
+  const lowerSec = rawSecurity.toLowerCase();
   const isOpenNetwork =
-    rawSecurity.toLowerCase().includes("open") ||
-    rawSecurity.toLowerCase().includes("none");
+    lowerSec === "open" ||
+    lowerSec === "none" ||
+    (lowerSec.includes("open") && !lowerSec.includes("wpa"));
 
   useEffect(() => {
     if (credentialModalOpen) {
@@ -77,7 +79,7 @@ export function WifiCredentialModal() {
     const ssidName = targetToAssociate.display_name || "Unknown SSID";
     const secHint = isOpenNetwork
       ? "open"
-      : rawSecurity.toLowerCase().includes("wpa3")
+      : lowerSec.includes("wpa3-personal") || lowerSec.includes("wpa3_sae") || (lowerSec.includes("wpa3") && !lowerSec.includes("wpa2"))
       ? "wpa3_sae"
       : "wpa2_personal";
 
@@ -91,7 +93,16 @@ export function WifiCredentialModal() {
       });
       setActiveAssociation(draft);
 
-      // 2. Direct ephemeral credential submission to local collector agent (port 8001)
+      // 2. Trigger connection in backend first (SS-10: establish backend associating state before agent starts)
+      await apiClient.connectAssociation(draft.id, {
+        target_id: targetToAssociate.target_id,
+        security_hint: secHint,
+        authorized_use_confirmed: true,
+        save_profile: saveProfile,
+        timeout_seconds: 30,
+      });
+
+      // 3. Direct ephemeral credential submission to local collector agent (port 8001)
       if (!isOpenNetwork) {
         await apiClient.sendDirectAssociate({
           association_id: draft.id,
@@ -103,15 +114,6 @@ export function WifiCredentialModal() {
           timeout_seconds: 30,
         });
       }
-
-      // 3. Trigger connection in backend (Zero-Secret guarantee: No password parameter!)
-      await apiClient.connectAssociation(draft.id, {
-        target_id: targetToAssociate.target_id,
-        security_hint: secHint,
-        authorized_use_confirmed: true,
-        save_profile: saveProfile,
-        timeout_seconds: 30,
-      });
 
       updateAssociationState("associating");
       setCredentialModalOpen(false);

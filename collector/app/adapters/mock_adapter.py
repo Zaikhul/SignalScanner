@@ -214,7 +214,7 @@ class MockSignalAdapter(SignalAdapter):
             "schema_version": "2.0",
             "session_id": config.session_id,
             "collector_id": collector_settings.COLLECTOR_ID,
-            "source_type": config.source_type or "collector",
+            "source_type": "simulator",
             "sequence_from": self._seq,
             "sequence_to": self._seq,
             "sent_at": now_iso,

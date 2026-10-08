@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { useScannerStore } from "@/lib/store";
 import { MeasurementEvent } from "@/lib/types";
+import { API_AUTH_TOKEN } from "@/lib/apiClient";
 
 export function useSessionStream(sessionId?: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
@@ -58,7 +59,7 @@ export function useSessionStream(sessionId?: string | null) {
       }
 
       const currentSeq = lastSequenceRef.current;
-      const apiToken = process.env.NEXT_PUBLIC_API_AUTH_TOKEN || "";
+      const apiToken = process.env.NEXT_PUBLIC_API_AUTH_TOKEN || API_AUTH_TOKEN || "";
       let wsUrl = `${wsBase}/ws/v1/sessions/${sessionId}?after_sequence=${currentSeq}`;
       if (apiToken) {
         wsUrl += `&token=${encodeURIComponent(apiToken)}`;
@@ -111,13 +112,14 @@ export function useSessionStream(sessionId?: string | null) {
             case "measurement.batch":
               recordScanActivity();
               if (msg.data && Array.isArray(msg.data)) {
-                const seqTo = msg.sequence_to || (lastSequenceRef.current + 1);
+                const incomingSeqTo = msg.sequence_to || (lastSequenceRef.current + 1);
                 // Detect gap
                 if (msg.sequence_from > lastSequenceRef.current + 1 && lastSequenceRef.current > 0) {
                   incrementDroppedFrames();
                 }
-                lastSequenceRef.current = seqTo;
-                setLastSequence(seqTo);
+                const nextSeq = Math.max(lastSequenceRef.current, incomingSeqTo);
+                lastSequenceRef.current = nextSeq;
+                setLastSequence(nextSeq);
                 addBatchMeasurements(msg.data as MeasurementEvent[], { trace_id: msg.trace_id });
               }
               break;

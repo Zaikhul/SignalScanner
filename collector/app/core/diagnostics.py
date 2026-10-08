@@ -174,9 +174,12 @@ class CollectorPreflightDiagnostics:
 
         # 4. Backend Connectivity layer
         try:
+            probe_headers = {}
+            if getattr(collector_settings, "API_AUTH_TOKEN", None):
+                probe_headers["Authorization"] = f"Bearer {collector_settings.API_AUTH_TOKEN}"
             async with httpx.AsyncClient(base_url=collector_settings.BACKEND_URL, timeout=3.0) as client:
                 t0 = time.monotonic()
-                res = await client.get("/api/v1/sessions")
+                res = await client.get("/api/v1/sessions", headers=probe_headers)
                 latency_ms = (time.monotonic() - t0) * 1000
                 if res.status_code == 200:
                     add_check(

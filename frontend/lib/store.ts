@@ -253,26 +253,29 @@ export const useScannerStore = create<ScannerStore>((set, get) => ({
         const isHistoricalToSnapshot = state.snapshotWatermark > 0 && ev.sequence <= state.snapshotWatermark;
 
         if (existing) {
-          const prevSig = existing.latest_signal;
-          if (prevSig !== undefined && prevSig !== null && Number.isFinite(prevSig)) {
-            existing.previous_signal = prevSig;
-            existing.delta_signal = Math.round((signalVal - prevSig) * 10) / 10;
+          const isNewerOrEqual = !existing.last_seen || new Date(ev.captured_at).getTime() >= new Date(existing.last_seen).getTime();
+          if (isNewerOrEqual) {
+            const prevSig = existing.latest_signal;
+            if (prevSig !== undefined && prevSig !== null && Number.isFinite(prevSig)) {
+              existing.previous_signal = prevSig;
+              existing.delta_signal = Math.round((signalVal - prevSig) * 10) / 10;
+            }
+            existing.last_seen = ev.captured_at;
+            existing.observed_at = observedAt;
+            existing.latest_signal = signalVal;
+            existing.out_of_scale = outOfScale;
+            if (ev.signal.snr !== undefined) existing.avg_snr = ev.signal.snr;
+            if (ev.display_name) existing.display_name = ev.display_name;
+            if (ev.radio?.channel) existing.channel = ev.radio.channel;
+            if (ev.radio?.band) existing.band = ev.radio.band;
+            if (ev.quality?.freshness) existing.freshness = ev.quality.freshness;
+            if (ev.quality?.source_method) existing.source_method = ev.quality.source_method;
           }
-          existing.last_seen = ev.captured_at;
-          existing.observed_at = observedAt;
-          existing.latest_signal = signalVal;
-          existing.out_of_scale = outOfScale;
           if (!isHistoricalToSnapshot) {
             existing.sample_count += 1;
             existing.min_signal = Math.min(existing.min_signal, signalVal);
             existing.max_signal = Math.max(existing.max_signal, signalVal);
           }
-          if (ev.signal.snr !== undefined) existing.avg_snr = ev.signal.snr;
-          if (ev.display_name) existing.display_name = ev.display_name;
-          if (ev.radio?.channel) existing.channel = ev.radio.channel;
-          if (ev.radio?.band) existing.band = ev.radio.band;
-          if (ev.quality?.freshness) existing.freshness = ev.quality.freshness;
-          if (ev.quality?.source_method) existing.source_method = ev.quality.source_method;
         } else {
           targetMap.set(ev.target_id, {
             target_id: ev.target_id,

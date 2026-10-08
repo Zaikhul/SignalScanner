@@ -14,6 +14,7 @@ class CollectorSettings(BaseSettings):
     SECRET_KEY: str = os.getenv("SECRET_KEY", "secret-signal-scanner-key-hmac-salt-change-in-prod")
     TENANT_SALT: str = os.getenv("TENANT_SALT", "tenant_default_salt_2026")
     COLLECTOR_API_KEY: str = os.getenv("COLLECTOR_API_KEY", "collector-dev-key-2026")
+    API_AUTH_TOKEN: str = os.getenv("API_AUTH_TOKEN", "signal-scanner-dev-token-2026")
     LOCAL_AGENT_TOKEN: str = os.getenv("LOCAL_AGENT_TOKEN", "signal-scanner-local-agent-token-2026")
     
     PLATFORM: str = platform.system().lower()  # windows, linux, darwin
@@ -28,8 +29,12 @@ class CollectorSettings(BaseSettings):
 
     def model_post_init(self, __context) -> None:
         if self.ENVIRONMENT == "production":
-            if "change-in-prod" in self.SECRET_KEY or self.TENANT_SALT == "tenant_default_salt_2026":
+            if not self.SECRET_KEY or "change-in-prod" in self.SECRET_KEY or not self.TENANT_SALT or self.TENANT_SALT == "tenant_default_salt_2026":
                 raise ValueError("Insecure default SECRET_KEY or TENANT_SALT in production mode!")
+            if not self.COLLECTOR_API_KEY or self.COLLECTOR_API_KEY == "collector-dev-key-2026":
+                raise ValueError("Insecure default or empty COLLECTOR_API_KEY in production mode!")
+            if not self.LOCAL_AGENT_TOKEN or self.LOCAL_AGENT_TOKEN == "signal-scanner-local-agent-token-2026":
+                raise ValueError("Insecure default or empty LOCAL_AGENT_TOKEN in production mode!")
 
 
 collector_settings = CollectorSettings()

@@ -1,5 +1,5 @@
-from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from typing import Any, Dict, List, Optional
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import verify_operator_auth
 from app.db.session import get_db
@@ -90,6 +90,20 @@ async def stop_session(session_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
 
+@router.post("/{session_id}/fail", response_model=SessionResponse)
+async def fail_session(
+    session_id: str,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark session as failed due to startup or adapter execution error."""
+    reason = payload.get("reason", "Scan execution failed")
+    try:
+        return await session_manager.fail_session(db, session_id, reason=reason)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
 @router.post("/{session_id}/markers", response_model=SessionMarkerResponse)
 async def add_session_marker(
     session_id: str,
@@ -101,3 +115,4 @@ async def add_session_marker(
         return await session_manager.add_marker(db, session_id, payload)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+

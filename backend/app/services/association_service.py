@@ -98,6 +98,10 @@ class AssociationService:
                 detail="WIFI_ENTERPRISE_UNSUPPORTED: Jaringan enterprise belum didukung pada versi ini.",
             )
 
+        # SS-10 Guard: If already connected, do not regress terminal success to ASSOCIATING
+        if assoc.state == AssociationState.CONNECTED.value:
+            return self._assoc_to_response(assoc)
+
         old_state = assoc.state
         assoc.state = AssociationState.ASSOCIATING.value
         assoc.security_type = payload.security_hint
@@ -261,13 +265,20 @@ class AssociationService:
                 detail=f"Association '{association_id}' not found",
             )
 
+        # SS-10 Guard: Do not regress CONNECTED back to ASSOCIATING from late callbacks
+        if assoc.state == AssociationState.CONNECTED.value and payload.state == AssociationState.ASSOCIATING.value:
+            # Preserve connected state but still update networking details if supplied
+            payload_state = AssociationState.CONNECTED.value
+        else:
+            payload_state = payload.state
+
         old_state = assoc.state
-        assoc.state = payload.state
+        assoc.state = payload_state
         now = datetime.now(timezone.utc)
 
-        if payload.state == AssociationState.CONNECTED.value:
+        if payload_state == AssociationState.CONNECTED.value:
             assoc.associated_at = now
-        elif payload.state in (AssociationState.IDLE.value, AssociationState.FAILED.value):
+        elif payload_state in (AssociationState.IDLE.value, AssociationState.FAILED.value):
             assoc.disconnected_at = now
 
         if payload.ipv4:
@@ -275,17 +286,32 @@ class AssociationService:
         if payload.ipv6:
             assoc.ipv6 = payload.ipv6
         if payload.prefix:
-            # Bound validation check: prefix wider than /16 must be rejected
+            prefix_str = payload.prefix.strip()
+            # Bound validation check: prefix must be valid RFC 1918 and not wider than /16
             try:
-                net = ipaddress.ip_network(payload.prefix, strict=False)
-                if net.version == 4 and net.prefixlen < 16:
+                net = ipaddress.ip_network(prefix_str, strict=False)
+                if net.version != 4:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="LAN_PREFIX_UNSUPPORTED: Only IPv4 prefixes are supported",
+                    )
+                if net.prefixlen < 16:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="LAN_PREFIX_UNSUPPORTED: IPv4 prefix wider than /16 is rejected",
                     )
-            except ValueError:
-                pass
-            assoc.prefix = payload.prefix
+                from app.core.lan_port_scanner import RFC1918_NETWORKS
+                if not any(net.subnet_of(rfc) for rfc in RFC1918_NETWORKS):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"LAN_PREFIX_NOT_RFC1918: Prefix '{prefix_str}' must be within RFC 1918 private ranges",
+                    )
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"INVALID_PREFIX: Malformed network prefix '{prefix_str}': {e}",
+                )
+            assoc.prefix = prefix_str
         if payload.gateway:
             assoc.gateway = payload.gateway
         if payload.dns is not None:
@@ -348,24 +374,38 @@ class AssociationService:
             )
 
         # Parse attached prefix for bound validation (FR-INV-02)
-        attached_net = None
-        if assoc.prefix:
-            try:
-                attached_net = ipaddress.ip_network(assoc.prefix, strict=False)
-            except ValueError:
-                attached_net = None
+        if not assoc.prefix:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"MISSING_ATTACHED_PREFIX: Association '{association_id}' does not have an attached prefix for host validation",
+            )
+
+        try:
+            attached_net = ipaddress.ip_network(assoc.prefix.strip(), strict=False)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"INVALID_ATTACHED_PREFIX: Malformed association prefix '{assoc.prefix}': {e}",
+            )
+
+        from app.core.lan_port_scanner import RFC1918_NETWORKS
 
         count = 0
         now = datetime.now(timezone.utc)
         for h in hosts:
-            # Bound validation check: ignore target outside attached subnet if attached_net exists
-            if attached_net and not h.is_self and not h.is_gateway:
-                try:
-                    ip_obj = ipaddress.ip_address(h.ip)
-                    if ip_obj not in attached_net:
-                        continue
-                except ValueError:
+            # Bound validation check: ignore target outside attached subnet or outside RFC 1918
+            try:
+                ip_obj = ipaddress.ip_address(h.ip)
+                if not isinstance(ip_obj, ipaddress.IPv4Address):
                     continue
+                if ip_obj.is_loopback or ip_obj.is_link_local:
+                    continue
+                if not any(ip_obj in rfc for rfc in RFC1918_NETWORKS):
+                    continue
+                if not h.is_self and not h.is_gateway and ip_obj not in attached_net:
+                    continue
+            except ValueError:
+                continue
 
             # Check existing host by association_id and (mac_hash OR ip)
             existing_res = await db.execute(
@@ -508,6 +548,19 @@ class AssociationService:
                 detail=f"Association '{association_id}' not found",
             )
 
+        # Enforce that association must be in active CONNECTED state
+        if assoc.state != AssociationState.CONNECTED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"ASSOCIATION_NOT_CONNECTED: Cannot scan LAN ports because association '{association_id}' state is '{assoc.state}', not 'connected'.",
+            )
+
+        if not assoc.prefix:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"MISSING_ATTACHED_PREFIX: Association '{association_id}' lacks a valid attached subnet prefix.",
+            )
+
         # Strict Scope Validation Gate
         from app.core.lan_port_scanner import lan_port_scanner, validate_lan_target
 
@@ -528,10 +581,6 @@ class AssociationService:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Host '{host_ip}' not found in association '{association_id}'",
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(e),
             )
 
         # Run non-blocking async port scan

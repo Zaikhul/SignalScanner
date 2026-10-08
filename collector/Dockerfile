@@ -17,4 +17,4 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8001
 
-CMD ["python", "-m", "collector.app.main", "--mode", "wifi", "--mock", "--backend-url", "http://backend:8000"]
+CMD ["python", "-m", "collector.app.main", "--mode", "wifi", "--backend-url", "http://backend:8000"]

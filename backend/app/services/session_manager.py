@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import math
 import statistics
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,6 +10,8 @@ import numpy as np
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+
+logger = logging.getLogger("backend.session_manager")
 
 from app.core.security import pseudonymize_identifier
 from app.core.signal_processor import signal_processor
@@ -105,6 +108,36 @@ class SessionManager:
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Cannot start session '{session_id}' in state '{session.status}'. Completed sessions cannot be reopened; create a new session.",
             )
+
+        # SS-04: Atomic isolation check - supersede any older active session on the same collector
+        if getattr(session, "source_type", "collector") == "collector" and session.collector_id:
+            res_active = await db.execute(
+                select(ScanSessionModel).where(
+                    ScanSessionModel.collector_id == session.collector_id,
+                    ScanSessionModel.id != session_id,
+                    ScanSessionModel.status.in_([SessionStatus.ACTIVE.value, SessionStatus.STARTING.value]),
+                )
+            )
+            for old_sess in res_active.scalars().all():
+                logger.warning(
+                    f"Superseding older active session '{old_sess.id}' on collector '{session.collector_id}' with new session '{session_id}'"
+                )
+                old_sess.status = SessionStatus.STOPPED.value
+                old_sess.ended_at = datetime.now(timezone.utc)
+                old_cfg = dict(old_sess.config or {})
+                old_cfg["status_reason"] = f"superseded_by_session_{session_id}"
+                old_sess.config = old_cfg
+                await stream_engine.publish_event(
+                    old_sess.id,
+                    {
+                        "type": "session.state_changed",
+                        "schema_version": "2.0",
+                        "session_id": old_sess.id,
+                        "status": SessionStatus.STOPPED.value,
+                        "status_reason": f"superseded_by_session_{session_id}",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
 
         session.status = SessionStatus.ACTIVE.value
         session.started_at = datetime.now(timezone.utc)
@@ -367,6 +400,41 @@ class SessionManager:
         )
 
     @staticmethod
+    async def fail_session(
+        db: AsyncSession, session_id: str, reason: str = "Scan execution failed"
+    ) -> SessionResponse:
+        """Transitions an active or starting session to FAILED state and cleans up resources (SS-07)."""
+        session = await db.get(ScanSessionModel, session_id)
+        if not session:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Session {session_id} not found")
+
+        session.status = SessionStatus.FAILED.value
+        session.ended_at = datetime.now(timezone.utc)
+        cfg = dict(session.config or {})
+        cfg["status_reason"] = reason
+        session.config = cfg
+
+        # Clear EMA state for this session
+        signal_processor.reset_session_ema(session_id)
+
+        await db.commit()
+        await db.refresh(session)
+
+        # Notify via Stream Engine
+        await stream_engine.publish_event(
+            session_id,
+            {
+                "type": "session.state_changed",
+                "schema_version": "2.0",
+                "session_id": session_id,
+                "status": SessionStatus.FAILED.value,
+                "status_reason": reason,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return await SessionManager.get_session_response(db, session_id)
+
+    @staticmethod
     async def ingest_batch(
         db: AsyncSession, batch: MeasurementBatch
     ) -> Dict[str, Any]:
@@ -411,6 +479,19 @@ class SessionManager:
                         f"MODE_MISMATCH: Batch measurement mode '{m_mode}' does not match session mode '{session.mode}'"
                     )
 
+        # SS-03: Provenance gate - reject simulated data in hardware collector session
+        if session_source == "collector" and batch.measurements:
+            for m in batch.measurements:
+                q = getattr(m, "quality", None)
+                if q:
+                    freshness = getattr(q, "freshness", None)
+                    source_method = getattr(q, "source_method", None)
+                    if freshness == "simulated" or source_method == "virtual_simulator":
+                        raise ValueError(
+                            "SIMULATED_DATA_REJECTED: Measurement batch contains simulated data ('simulated' / 'virtual_simulator') "
+                            "which is strictly disallowed for hardware collector sessions."
+                        )
+
         # Check privacy mask_ssid configuration (F-20)
         mask_ssid = False
         if session.config and isinstance(session.config, dict):
@@ -420,7 +501,7 @@ class SessionManager:
             elif session.config.get("mask_ssid"):
                 mask_ssid = True
 
-        # Deduplication against already persisted measurements in this sequence range (F-06)
+        # Deduplication against already persisted measurements in this sequence range (F-06, SS-08)
         res_existing = await db.execute(
             select(MeasurementModel.sequence, MeasurementModel.target_id).where(
                 MeasurementModel.session_id == batch.session_id,
@@ -432,6 +513,8 @@ class SessionManager:
 
         processed_events: List[Dict[str, Any]] = []
         batch_target_dicts: List[Dict[str, Any]] = []
+        inserted_count = 0
+        duplicate_count = 0
 
         for m in batch.measurements:
             target_id = m.target_id
@@ -439,20 +522,21 @@ class SessionManager:
                 target_id = pseudonymize_identifier(target_id)
                 m.target_id = target_id
 
+            meas_pair = (m.sequence, target_id)
+            if meas_pair in existing_pairs:
+                duplicate_count += 1
+                # SS-08: Duplicate batch item filtered out before EMA, target state, metrics, or stream
+                continue
+
+            existing_pairs.add(meas_pair)
+            inserted_count += 1
+
             # Apply mask_ssid if configured (F-20)
             if mask_ssid and m.display_name:
                 if len(m.display_name) > 3:
                     m.display_name = f"***{m.display_name[-3:]}"
                 else:
                     m.display_name = "***"
-
-            # Apply EMA smoothing scoped to session (F-23)
-            smoothed = signal_processor.calculate_ema(target_id, m.signal.value, session_id=batch.session_id)
-            m.signal.smoothed_value = smoothed
-
-            # Calculate SNR if noise is available or compute from floor
-            if m.signal.noise is not None and m.signal.snr is None:
-                m.signal.snr = signal_processor.calculate_snr(m.signal.value, m.signal.noise)
 
             # Check or create target
             res_target = await db.execute(
@@ -462,12 +546,14 @@ class SessionManager:
                 )
             )
             target = res_target.scalar_one_or_none()
-            
+
             chan = m.radio.channel if m.radio else None
             band = m.radio.band if m.radio else None
             freq = m.radio.frequency_hz if m.radio else None
             width_mhz = m.radio.channel_width_mhz if m.radio and m.radio.channel_width_mhz else None
 
+            # SS-05: Protection against out-of-order/backlog regression of live latest state
+            is_chronologically_newer = True
             if not target:
                 init_meta = dict(m.extra_metadata or {})
                 init_meta["latest_rssi"] = m.signal.value
@@ -489,18 +575,38 @@ class SessionManager:
                 db.add(target)
                 await db.flush()
             else:
-                target.last_seen = m.captured_at
-                if m.display_name:
-                    target.display_name = m.display_name
-                if chan:
-                    target.channel = chan
-                if band:
-                    target.band = band
-                target_meta = dict(target.metadata_json or {})
-                target_meta["latest_rssi"] = m.signal.value
-                if width_mhz:
-                    target_meta["channel_width_mhz"] = width_mhz
-                target.metadata_json = target_meta
+                cap_dt = m.captured_at
+                last_dt = target.last_seen
+                if cap_dt and cap_dt.tzinfo is not None:
+                    cap_dt = cap_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                if last_dt and last_dt.tzinfo is not None:
+                    last_dt = last_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                is_chronologically_newer = not last_dt or cap_dt >= last_dt
+                if is_chronologically_newer:
+                    target.last_seen = m.captured_at
+                    if m.display_name:
+                        target.display_name = m.display_name
+                    if chan:
+                        target.channel = chan
+                    if band:
+                        target.band = band
+                    target_meta = dict(target.metadata_json or {})
+                    target_meta["latest_rssi"] = m.signal.value
+                    if width_mhz:
+                        target_meta["channel_width_mhz"] = width_mhz
+                    target.metadata_json = target_meta
+
+            # Apply EMA smoothing scoped to session (F-23)
+            # SS-05: Only update forward EMA if chronologically newer; late historical samples do not alter live EMA
+            if is_chronologically_newer:
+                smoothed = signal_processor.calculate_ema(target_id, m.signal.value, session_id=batch.session_id)
+                m.signal.smoothed_value = smoothed
+            else:
+                m.signal.smoothed_value = None
+
+            # Calculate SNR if noise is available or compute from floor
+            if m.signal.noise is not None and m.signal.snr is None:
+                m.signal.snr = signal_processor.calculate_snr(m.signal.value, m.signal.noise)
 
             # Extract FQ-01 quality attributes
             q = m.quality
@@ -510,36 +616,32 @@ class SessionManager:
             source_method = getattr(q, "source_method", "unknown")
             rssi_processing = getattr(q, "rssi_processing", "unknown")
 
-            # Create Measurement record with idempotency deduplication (F-06)
-            meas_pair = (m.sequence, target_id)
-            if meas_pair not in existing_pairs:
-                existing_pairs.add(meas_pair)
-                meas_extra = dict(m.extra_metadata or {})
-                if width_mhz:
-                    meas_extra["channel_width_mhz"] = width_mhz
+            meas_extra = dict(m.extra_metadata or {})
+            if width_mhz:
+                meas_extra["channel_width_mhz"] = width_mhz
 
-                meas = MeasurementModel(
-                    session_id=batch.session_id,
-                    target_id=target_id,
-                    target_db_id=target.id,
-                    sequence=m.sequence,
-                    captured_at=m.captured_at,
-                    signal_value=m.signal.value,
-                    unit=m.signal.unit,
-                    noise_floor=m.signal.noise,
-                    snr=m.signal.snr,
-                    frequency_hz=freq,
-                    channel=chan,
-                    band=band,
-                    scan_id=scan_id,
-                    trace_id=trace_id,
-                    freshness=freshness,
-                    source_method=source_method,
-                    rssi_processing=rssi_processing,
-                    quality_flags=q.model_dump(mode="json") if hasattr(q, "model_dump") else {},
-                    raw_extra=meas_extra,
-                )
-                db.add(meas)
+            meas = MeasurementModel(
+                session_id=batch.session_id,
+                target_id=target_id,
+                target_db_id=target.id,
+                sequence=m.sequence,
+                captured_at=m.captured_at,
+                signal_value=m.signal.value,
+                unit=m.signal.unit,
+                noise_floor=m.signal.noise,
+                snr=m.signal.snr,
+                frequency_hz=freq,
+                channel=chan,
+                band=band,
+                scan_id=scan_id,
+                trace_id=trace_id,
+                freshness=freshness,
+                source_method=source_method,
+                rssi_processing=rssi_processing,
+                quality_flags=q.model_dump(mode="json") if hasattr(q, "model_dump") else {},
+                raw_extra=meas_extra,
+            )
+            db.add(meas)
 
             event_dict = m.model_dump(mode="json")
             processed_events.append(event_dict)
@@ -572,22 +674,28 @@ class SessionManager:
 
         await db.commit()
 
-        # Publish WebSocket event envelope with quality & channel metadata
-        envelope = {
-            "type": "measurement.batch",
-            "schema_version": "2.0",
-            "trace_id": batch.trace_id,
-            "scan_id": batch.scan_id,
-            "session_id": batch.session_id,
-            "collector_id": batch.collector_id,
-            "sequence_from": batch.sequence_from,
-            "sequence_to": batch.sequence_to,
-            "sent_at": batch.sent_at.isoformat(),
-            "data": processed_events,
-        }
-        await stream_engine.publish_event(batch.session_id, envelope)
+        # Publish WebSocket event envelope with quality & channel metadata if new events exist
+        if processed_events:
+            envelope = {
+                "type": "measurement.batch",
+                "schema_version": "2.0",
+                "trace_id": batch.trace_id,
+                "scan_id": batch.scan_id,
+                "session_id": batch.session_id,
+                "collector_id": batch.collector_id,
+                "sequence_from": batch.sequence_from,
+                "sequence_to": batch.sequence_to,
+                "sent_at": batch.sent_at.isoformat(),
+                "data": processed_events,
+            }
+            await stream_engine.publish_event(batch.session_id, envelope)
 
-        return {"status": "ok", "ingested_count": len(batch.measurements)}
+        return {
+            "status": "ok",
+            "ingested_count": inserted_count,
+            "duplicate_count": duplicate_count,
+            "total_count": len(batch.measurements),
+        }
 
     @staticmethod
     async def get_session_manifest(
