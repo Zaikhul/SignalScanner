@@ -7,8 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class CollectorSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    COLLECTOR_ID: str = os.getenv("COLLECTOR_ID", f"col_{socket.gethostname().lower().replace('-', '_')}")
-    COLLECTOR_NAME: str = os.getenv("COLLECTOR_NAME", f"Scanner ({socket.gethostname()})")
+    COLLECTOR_ID: str = os.getenv("COLLECTOR_ID", "col_default")
+    COLLECTOR_NAME: str = os.getenv("COLLECTOR_NAME", "Local Host Collector")
     BACKEND_URL: str = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
     SECRET_KEY: str = os.getenv("SECRET_KEY", "secret-signal-scanner-key-hmac-salt-change-in-prod")
@@ -23,7 +23,7 @@ class CollectorSettings(BaseSettings):
     MAX_BUFFER_RECORDS: int = 5000
 
     # Polling intervals
-    HEARTBEAT_INTERVAL_SECONDS: int = 5
+    HEARTBEAT_INTERVAL_SECONDS: float = float(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "1.5"))
     DEFAULT_SAMPLE_INTERVAL_MS: int = 500
 
     def model_post_init(self, __context) -> None:

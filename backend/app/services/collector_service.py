@@ -162,7 +162,7 @@ class CollectorService:
                 platform=c.platform,
             )
 
-            # Determine effective status: mark as offline if no heartbeat in 30 seconds
+            # Determine effective status: mark as offline if no heartbeat in 30 seconds or never seen
             effective_status = c.status
             if c.last_seen:
                 last_seen_ts = c.last_seen
@@ -171,6 +171,8 @@ class CollectorService:
                 age_seconds = (now - last_seen_ts).total_seconds()
                 if age_seconds > 30 and effective_status not in ("offline",):
                     effective_status = "offline"
+            else:
+                effective_status = "offline"
 
             status_enum = CollectorStatus(effective_status) if effective_status in CollectorStatus._value2member_map_ else CollectorStatus.OFFLINE
 

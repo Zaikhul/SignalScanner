@@ -94,8 +94,13 @@ def test_offline_geoip_source_resolution():
 
 
 @pytest.mark.asyncio
-async def test_geography_service_endpoint_and_relations(geo_test_db: AsyncSession):
+async def test_geography_service_endpoint_and_relations(geo_test_db: AsyncSession, monkeypatch: pytest.MonkeyPatch):
     """Verify that WebScanGeographyService builds web_scan.geo.v1 responses with accurate relations and coverage."""
+    monkeypatch.setattr("app.services.web_scan_geography_service.settings.WEB_SCAN_EXECUTOR_LATITUDE", -6.2088)
+    monkeypatch.setattr("app.services.web_scan_geography_service.settings.WEB_SCAN_EXECUTOR_LONGITUDE", 106.8456)
+    monkeypatch.setattr("app.services.web_scan_geography_service.settings.WEB_SCAN_EXECUTOR_CITY", "Jakarta")
+    monkeypatch.setattr("app.services.web_scan_geography_service.settings.WEB_SCAN_EXECUTOR_COUNTRY", "Indonesia")
+
     scan_id = str(uuid.uuid4())
     tenant_id = "test_tenant"
 
@@ -268,3 +273,15 @@ async def test_geography_tenant_isolation(geo_test_db: AsyncSession):
     # Query with mismatching tenant
     res = await WebScanGeographyService.get_scan_geography(geo_test_db, "beta_tenant", scan_id)
     assert res is None
+
+
+def test_offline_geoip_unmapped_public_ip_returns_unknown():
+    """Verify that unmapped public IPs return unknown status and None point rather than inventing fake coordinates."""
+    # 204.79.197.200 is a public IP not in the offline known database
+    point, level, status, basis, reason = OfflineGeoIPService.lookup_target_ip("204.79.197.200")
+    assert point is None
+    assert status == "unknown"
+    assert basis == "unknown"
+    assert level == "unknown"
+    assert "not found" in reason.lower()
+

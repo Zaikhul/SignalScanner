@@ -127,4 +127,41 @@ describe("Association & LAN Host Store Features (PRD v1.1)", () => {
     expect(useScannerStore.getState().lanHosts).toHaveLength(0);
     expect(useScannerStore.getState().adapterConflictNotice).toBeNull();
   });
+
+  it("should preserve and update open_ports on LAN host", () => {
+    const store = useScannerStore.getState();
+
+    const initialHost: LanHost = {
+      ip: "192.168.1.100",
+      ip_version: 4,
+      hostname: "webserver.local",
+      mac_hash: "hash_webserver",
+      oui_vendor: "Intel Corp",
+      discovery_methods: ["arp_cache"],
+      reachability: "up",
+      is_self: false,
+      is_gateway: false,
+      quality_flags: ["arp_cache"],
+      last_seen: new Date().toISOString(),
+    };
+
+    store.upsertLanHost(initialHost);
+    expect(useScannerStore.getState().lanHosts[0].open_ports).toBeUndefined();
+
+    // After port scan completes
+    const scannedHost: LanHost = {
+      ...initialHost,
+      open_ports: [
+        { port: 80, service: "HTTP", state: "open" },
+        { port: 443, service: "HTTPS", state: "open" },
+      ],
+    };
+
+    store.upsertLanHost(scannedHost);
+    const hostInStore = useScannerStore.getState().lanHosts[0];
+    expect(hostInStore.open_ports).toHaveLength(2);
+    expect(hostInStore.open_ports?.[0].port).toBe(80);
+    expect(hostInStore.open_ports?.[0].service).toBe("HTTP");
+    expect(hostInStore.open_ports?.[1].port).toBe(443);
+  });
 });

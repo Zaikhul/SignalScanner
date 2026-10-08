@@ -1,14 +1,26 @@
 "use client";
 
 import React, { useState } from "react";
-import { Play, Pause, Stop, BookmarkSimple, CircleNotch, Sparkle, WarningCircle, Cpu, CheckCircle } from "@phosphor-icons/react";
-import { apiClient, API_BASE } from "@/lib/apiClient";
+import {
+  Play,
+  Pause,
+  Stop,
+  BookmarkSimple,
+  CircleNotch,
+  WarningCircle,
+  Cpu,
+  CheckCircle,
+  Copy,
+  X,
+} from "@phosphor-icons/react";
+import { apiClient } from "@/lib/apiClient";
 import { useScannerStore } from "@/lib/store";
 
 export function SessionControls() {
   const {
     mode,
     selectedCollectorId,
+    setSelectedCollectorId,
     collectors,
     setCollectors,
     activeSession,
@@ -16,84 +28,85 @@ export function SessionControls() {
     updateSessionStatus,
     setMarkerModalOpen,
     resetLiveState,
-    simulationMode,
   } = useScannerStore();
 
   const [loading, setLoading] = useState(false);
+  const [spawningDaemon, setSpawningDaemon] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
+  const [collectorPrompt, setCollectorPrompt] = useState<{
+    collectorName: string;
+    mode: string;
+  } | null>(null);
   const status = activeSession?.status || "draft";
 
+  const handleSpawnDaemon = async () => {
+    setSpawningDaemon(true);
+    setErrorMessage(null);
+    try {
+      const res = await apiClient.spawnLocalDaemon("col_default", mode);
+      setInfoMessage(res.message || "Daemon collector lokal berhasil dijalankan!");
+
+      // Wait 1.5s for daemon to register and send initial heartbeat
+      setTimeout(async () => {
+        try {
+          const fresh = await apiClient.listCollectors();
+          setCollectors(fresh);
+          const found = fresh.find((c) => c.id === "col_default");
+          if (found && found.status !== "offline") {
+            setCollectorPrompt(null);
+          }
+        } catch {}
+      }, 1500);
+    } catch (e: any) {
+      setErrorMessage(e.message || "Gagal menyalakan daemon collector lokal.");
+    } finally {
+      setSpawningDaemon(false);
+    }
+  };
+
   const handleStart = async () => {
-    setLoading(true);
     setErrorMessage(null);
     setInfoMessage(null);
+    setCollectorPrompt(null);
+    setLoading(true);
     resetLiveState();
 
     try {
-      if (simulationMode) {
-        // --- 1. SIMULATOR MODE (EXPLICIT) ---
-        const session = await apiClient.createSession({
-          name: `Simulasi ${mode.toUpperCase()} - ${new Date().toLocaleTimeString()}`,
+      // --- HARDWARE COLLECTOR REAL MEASUREMENT ---
+      // Refresh collector list from API to get accurate online/offline status
+      const freshCollectors = await apiClient.listCollectors();
+      setCollectors(freshCollectors);
+
+      // Dedicated Local Host Collector resolution
+      const localCollector =
+        freshCollectors.find((c) => c.id === "col_default") || freshCollectors[0];
+
+      if (!localCollector || localCollector.status === "offline") {
+        setCollectorPrompt({
+          collectorName: localCollector?.name || "Local Host Collector",
           mode,
-          collector_id: "col_virtual_simulator",
-          source_type: "simulator",
-          sample_interval_ms: 500,
-          tags: [mode, "simulator", "virtual_engine"],
         });
-
-        const started = await apiClient.startSession(session.id);
-        setActiveSession(started);
-
-        // Run in-browser simulator explicitly for virtual testing
-        startSimulator(started.id, mode);
-        setInfoMessage(`Sesi simulasi '${started.id}' aktif.`);
-        setTimeout(() => setInfoMessage(null), 6000);
-      } else {
-        // --- 2. HARDWARE COLLECTOR MODE ---
-        // Refresh collector list from API to get accurate online/offline status
-        const freshCollectors = await apiClient.listCollectors();
-        setCollectors(freshCollectors);
-
-        // Resolve user's selected collector from the refreshed list
-        const chosenCollector = freshCollectors.find((c) => c.id === selectedCollectorId);
-
-        if (!chosenCollector) {
-          throw new Error(
-            `Collector '${selectedCollectorId}' tidak ditemukan di sistem.\n\n` +
-            "Pastikan daemon collector lokal telah dijalankan:\n" +
-            `  python -m collector.app.main --mode ${mode}\n\n` +
-            "atau pilih collector yang tersedia dari menu Collector, atau aktifkan 'Mode Simulasi'."
-          );
-        }
-
-        if (chosenCollector.status === "offline") {
-          throw new Error(
-            `Collector terpilih '${chosenCollector.name || chosenCollector.id}' sedang OFFLINE.\n\n` +
-            "Jalankan daemon collector lokal terlebih dahulu atau periksa koneksinya."
-          );
-        }
-
-        const collectorId = chosenCollector.id;
-
-        const session = await apiClient.createSession({
-          name: `Sesi ${mode.toUpperCase()} [Hardware] - ${new Date().toLocaleTimeString()}`,
-          mode,
-          collector_id: collectorId,
-          source_type: "collector",
-          sample_interval_ms: 500,
-          tags: [mode, "hardware", "native_scan"],
-        });
-
-        const started = await apiClient.startSession(session.id);
-        setActiveSession(started);
-
-        // Inform user that the backend has dispatched the scan command to the daemon
-        setInfoMessage(
-          `Sesi '${started.id}' aktif. Perintah scan dikirim ke collector '${collectorId}'.`
-        );
-        setTimeout(() => setInfoMessage(null), 6000);
+        setLoading(false);
+        return;
       }
+
+      const session = await apiClient.createSession({
+        name: `Sesi ${mode.toUpperCase()} [Hardware] - ${new Date().toLocaleTimeString()}`,
+        mode,
+        collector_id: "col_default",
+        source_type: "collector",
+        sample_interval_ms: 500,
+        tags: [mode, "hardware", "native_scan"],
+      });
+
+      const started = await apiClient.startSession(session.id);
+      setActiveSession(started);
+
+      setInfoMessage(
+        `Sesi pemindaian real '${started.id}' aktif. Perintah dikirim ke Local Host Collector.`
+      );
+      setTimeout(() => setInfoMessage(null), 6000);
     } catch (e: any) {
       console.error("Failed to start scan", e);
       setErrorMessage(e.message || "Gagal memulai pemindaian.");
@@ -106,7 +119,7 @@ export function SessionControls() {
     if (!activeSession) return;
     setLoading(true);
     try {
-      const updated = await apiClient.pauseSession(activeSession.id);
+      await apiClient.pauseSession(activeSession.id);
       updateSessionStatus("paused");
     } catch (e: any) {
       console.error("Failed to pause scan", e);
@@ -120,7 +133,7 @@ export function SessionControls() {
     if (!activeSession) return;
     setLoading(true);
     try {
-      const updated = await apiClient.resumeSession(activeSession.id);
+      await apiClient.resumeSession(activeSession.id);
       updateSessionStatus("active");
     } catch (e: any) {
       console.error("Failed to resume scan", e);
@@ -133,7 +146,6 @@ export function SessionControls() {
   const handleStop = async () => {
     if (!activeSession) return;
     setLoading(true);
-    stopSimulator();
     try {
       const updated = await apiClient.stopSession(activeSession.id);
       setActiveSession(updated);
@@ -153,18 +165,10 @@ export function SessionControls() {
         <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider block">
           Kontrol Sesi
         </label>
-        {/* Source Badge */}
-        {simulationMode ? (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono bg-purple-500/10 border border-purple-500/30 text-purple-300">
-            <Sparkle size={11} />
-            SIMULATOR
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 border border-emerald-500/30 text-emerald-300">
-            <Cpu size={11} />
-            HARDWARE
-          </span>
-        )}
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 border border-emerald-500/30 text-emerald-300">
+          <Cpu size={11} />
+          PENGUKURAN REAL
+        </span>
       </div>
 
       {/* Info Banner (Green/Emerald) */}
@@ -187,6 +191,62 @@ export function SessionControls() {
         </div>
       )}
 
+      {/* Collector Offline Banner with 1-Click Daemon Spawn */}
+      {collectorPrompt && (
+        <div className="p-3.5 rounded-[var(--radius-control)] bg-amber-500/10 border border-amber-500/25 space-y-2.5 text-xs animate-fadeIn">
+          <div className="flex items-start gap-2.5 text-amber-300">
+            <WarningCircle size={18} className="shrink-0 mt-0.5 text-amber-400" />
+            <div className="space-y-1">
+              <p className="font-semibold text-zinc-100">
+                Daemon Hardware Belum Aktif
+              </p>
+              <p className="text-[11px] text-zinc-300 leading-relaxed">
+                Kolektor &quot;{collectorPrompt.collectorName}&quot; belum terdeteksi aktif di sistem. Nyalakan daemon hardware untuk melakukan pemindaian nyata dengan pengukuran gelombang sinyal aktual.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <button
+              type="button"
+              disabled={spawningDaemon}
+              onClick={handleSpawnDaemon}
+              className="px-3 py-1.5 rounded-[var(--radius-control)] bg-[var(--color-signal)] text-zinc-950 font-semibold text-xs flex items-center gap-1.5 hover:opacity-90 transition cursor-pointer disabled:opacity-50"
+            >
+              {spawningDaemon ? (
+                <CircleNotch size={14} className="animate-spin" />
+              ) : (
+                <Play size={14} weight="fill" />
+              )}
+              <span>Nyalakan Daemon Lokal (1-Click)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                navigator.clipboard.writeText(`python -m collector.app.main --mode ${collectorPrompt.mode}`);
+                setInfoMessage("Perintah daemon CLI disalin ke clipboard!");
+                setTimeout(() => setInfoMessage(null), 3000);
+              }}
+              className="px-2.5 py-1.5 rounded-[var(--radius-control)] border border-white/10 hover:bg-white/5 text-zinc-300 text-xs flex items-center gap-1.5 transition cursor-pointer"
+              title="Salin perintah untuk menjalankan collector daemon secara manual"
+            >
+              <Copy size={13} />
+              <span>Salin Perintah CLI</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setCollectorPrompt(null)}
+              className="p-1 ml-auto text-zinc-400 hover:text-zinc-200 transition cursor-pointer"
+              title="Tutup pesan"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="space-y-2">
         {status === "draft" || status === "completed" || status === "stopped" ? (
           <button
@@ -200,7 +260,7 @@ export function SessionControls() {
             ) : (
               <Play size={18} weight="fill" />
             )}
-            <span>Mulai Pemindaian</span>
+            <span>Mulai Pemindaian Real</span>
           </button>
         ) : status === "active" ? (
           <div className="grid grid-cols-2 gap-2">
@@ -279,130 +339,4 @@ export function SessionControls() {
       </div>
     </div>
   );
-}
-
-// In-Browser Simulator Engine (Explicit Simulator Mode Only)
-let simInterval: any = null;
-let simSeq = 0;
-
-function stopSimulator() {
-  if (simInterval) {
-    clearInterval(simInterval);
-    simInterval = null;
-  }
-}
-
-function startSimulator(sessionId: string, mode: string) {
-  stopSimulator();
-  simSeq = 0;
-
-  simInterval = setInterval(async () => {
-    simSeq++;
-    const state = useScannerStore.getState();
-    if (!state.activeSession || state.activeSession.status !== "active") {
-      stopSimulator();
-      return;
-    }
-
-    const now = new Date().toISOString();
-    let measurements: any[] = [];
-
-    if (mode === "wifi") {
-      const aps = [
-        { ssid: "Office_HQ_5G", mac: "00:1A:2B:3C:4D:01", ch: 36, band: "5GHz", base: -52 },
-        { ssid: "Office_HQ_2.4G", mac: "00:1A:2B:3C:4D:02", ch: 6, band: "2.4GHz", base: -48 },
-        { ssid: "Guest_Portal", mac: "00:1A:2B:3C:4D:03", ch: 1, band: "2.4GHz", base: -65 },
-        { ssid: "IoT_Mesh_Node_9", mac: "00:1A:2B:3C:4D:04", ch: 11, band: "2.4GHz", base: -74 },
-        { ssid: "Lab_WiFi6_AX", mac: "00:1A:2B:3C:4D:07", ch: 149, band: "5GHz", base: -55 },
-      ];
-      measurements = aps.map((ap) => {
-        const drift = 3.5 * Math.sin(simSeq * 0.15 + ap.base);
-        const rssi = Math.round((ap.base + drift + (Math.random() * 2 - 1)) * 10) / 10;
-        return {
-          schema_version: "1.0",
-          session_id: sessionId,
-          collector_id: "col_virtual_simulator",
-          sequence: simSeq,
-          captured_at: now,
-          mode: "wifi",
-          target_id: ap.mac,
-          display_name: ap.ssid,
-          signal: { value: rssi, unit: "dBm", noise: -94.0 },
-          radio: { channel: ap.ch, band: ap.band },
-          quality: { calibrated: false, permission_limited: false, throttled: false },
-        };
-      });
-    } else if (mode === "bluetooth") {
-      const bles = [
-        { name: "iBeacon_Proximity", mac: "C0:EE:40:11:22:01", base: -50, mfg: "Apple Inc." },
-        { name: "Nordic_Smart_Tag", mac: "C0:EE:40:11:22:02", base: -62, mfg: "Nordic Semi" },
-        { name: "ESP32_Sensor_Node", mac: "C0:EE:40:11:22:03", base: -76, mfg: "Espressif" },
-        { name: "BLE_HeartRate_04", mac: "C0:EE:40:11:22:05", base: -68, mfg: "Garmin" },
-      ];
-      measurements = bles.map((b) => {
-        const drift = 4.0 * Math.sin(simSeq * 0.2 + b.base);
-        const rssi = Math.round((b.base + drift + (Math.random() * 2 - 1)) * 10) / 10;
-        return {
-          schema_version: "1.0",
-          session_id: sessionId,
-          collector_id: "col_virtual_simulator",
-          sequence: simSeq,
-          captured_at: now,
-          mode: "bluetooth",
-          target_id: b.mac,
-          display_name: b.name,
-          signal: { value: rssi, unit: "dBm", noise: -96.0 },
-          radio: null,
-          quality: { calibrated: false, permission_limited: false, throttled: false },
-          extra_metadata: { manufacturer: b.mfg },
-        };
-      });
-    } else {
-      // Radio SDR mode
-      const bins = Array.from({ length: 256 }, (_, i) => {
-        const noise = -92 + (Math.random() * 3 - 1.5);
-        if (Math.abs(i - 128) < 3) return -38 + 2 * Math.sin(simSeq * 0.3) - Math.abs(i - 128) * 4;
-        if (Math.abs(i - 180) < 2) return -54 - Math.abs(i - 180) * 3;
-        return noise;
-      });
-      measurements = [
-        {
-          schema_version: "1.0",
-          session_id: sessionId,
-          collector_id: "col_virtual_simulator",
-          sequence: simSeq,
-          captured_at: now,
-          mode: "radio",
-          target_id: "rf_433.92mhz",
-          display_name: "RF 433.92 MHz ISM Carrier",
-          signal: { value: -38.0, unit: "dBFS", noise: -92.0 },
-          radio: {
-            center_frequency_hz: 433920000,
-            span_hz: 2000000,
-            fft_size: 256,
-            fft_bins: bins,
-          },
-          quality: { calibrated: false, permission_limited: false, throttled: false },
-        },
-      ];
-    }
-
-    try {
-      await fetch(`${API_BASE}/api/v1/collector-ingest/batches`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          schema_version: "1.0",
-          session_id: sessionId,
-          collector_id: "col_virtual_simulator",
-          source_type: "simulator",
-          sequence_from: simSeq,
-          sequence_to: simSeq,
-          measurements,
-        }),
-      });
-    } catch {
-      // Ignore if server unreachable
-    }
-  }, 500);
 }

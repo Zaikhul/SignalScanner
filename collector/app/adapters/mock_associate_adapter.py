@@ -142,6 +142,10 @@ class MockLanInventoryAdapter:
                 "is_self": True,
                 "is_gateway": False,
                 "quality_flags": ["self", "interface_snapshot"],
+                "open_ports": [
+                    {"port": 8000, "service": "HTTP-ALT", "state": "open"},
+                    {"port": 8080, "service": "HTTP-PROXY", "state": "open"},
+                ],
             },
             {
                 "ip": bound.gateway_ip or "192.168.10.1",
@@ -155,6 +159,11 @@ class MockLanInventoryAdapter:
                 "is_self": False,
                 "is_gateway": True,
                 "quality_flags": ["gateway", "arp_cache"],
+                "open_ports": [
+                    {"port": 53, "service": "DNS", "state": "open"},
+                    {"port": 80, "service": "HTTP", "state": "open"},
+                    {"port": 443, "service": "HTTPS", "state": "open"},
+                ],
             },
             {
                 "ip": "192.168.10.12",
@@ -168,6 +177,11 @@ class MockLanInventoryAdapter:
                 "is_self": False,
                 "is_gateway": False,
                 "quality_flags": ["arp_cache", "solicited"],
+                "open_ports": [
+                    {"port": 22, "service": "SSH", "state": "open"},
+                    {"port": 445, "service": "SMB", "state": "open"},
+                    {"port": 3389, "service": "RDP", "state": "open"},
+                ],
             },
             {
                 "ip": "192.168.10.88",
@@ -181,6 +195,11 @@ class MockLanInventoryAdapter:
                 "is_self": False,
                 "is_gateway": False,
                 "quality_flags": ["arp_cache", "mdns"],
+                "open_ports": [
+                    {"port": 80, "service": "HTTP", "state": "open"},
+                    {"port": 631, "service": "IPP", "state": "open"},
+                    {"port": 9100, "service": "RAW-PRINT", "state": "open"},
+                ],
             },
             {
                 "ip": "192.168.10.150",
@@ -194,6 +213,10 @@ class MockLanInventoryAdapter:
                 "is_self": False,
                 "is_gateway": False,
                 "quality_flags": ["solicited", "mdns"],
+                "open_ports": [
+                    {"port": 80, "service": "HTTP", "state": "open"},
+                    {"port": 1883, "service": "MQTT", "state": "open"},
+                ],
             },
         ]
 

@@ -60,7 +60,61 @@ async def init_db() -> None:
                 except Exception:
                     pass
 
+            if "lan_hosts" in inspector.get_table_names():
+                existing_lan_cols = {c["name"] for c in inspector.get_columns("lan_hosts")}
+                if "open_ports" not in existing_lan_cols:
+                    try:
+                        sync_conn.execute(text("ALTER TABLE lan_hosts ADD COLUMN open_ports JSON DEFAULT '[]'"))
+                    except Exception:
+                        pass
+
+            if "collectors" in inspector.get_table_names():
+                try:
+                    sync_conn.execute(text("ALTER TABLE collectors ALTER COLUMN last_seen DROP NOT NULL"))
+                except Exception:
+                    pass
+
         await conn.run_sync(sync_upgrade_columns)
+
+    # Auto-seed single Local Host Collector if not present
+    from datetime import datetime, timezone
+    from sqlalchemy import select
+    from app.db.models import CollectorModel
+
+    async with AsyncSessionLocal() as session:
+        now = datetime.now(timezone.utc)
+
+        res_def = await session.execute(select(CollectorModel).where(CollectorModel.id == "col_default"))
+        def_col = res_def.scalar_one_or_none()
+        if not def_col:
+            def_col = CollectorModel(
+                id="col_default",
+                name="Local Host Collector",
+                platform="windows",
+                version="1.0.0",
+                status="offline",
+                capabilities={
+                    "supported_modes": ["wifi", "bluetooth", "radio"],
+                    "adapters": [
+                        {"id": "win_wlan_01", "type": "wifi", "name": "Windows Native WiFi Scanner", "is_available": True},
+                        {"id": "ble_bleak_01", "type": "bluetooth", "name": "Bleak BLE Scanner", "is_available": True},
+                        {"id": "sdr_soapy_01", "type": "radio", "name": "SoapySDR Rx Scanner", "is_available": True},
+                    ],
+                    "platform": "windows",
+                    "version": "1.0.0",
+                    "can_sdr": True,
+                    "can_wifi": True,
+                    "can_ble": True,
+                },
+                last_seen=datetime.fromtimestamp(0, timezone.utc),
+            )
+            session.add(def_col)
+        else:
+            def_col.name = "Local Host Collector"
+            def_col.status = "offline"
+            def_col.last_seen = datetime.fromtimestamp(0, timezone.utc)
+
+        await session.commit()
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

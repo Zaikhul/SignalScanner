@@ -76,7 +76,7 @@ export function MeasurementQualityStrip({
       case "soapysdr_rx":
         return "SoapySDR Native Rx";
       case "virtual_simulator":
-        return "Virtual Simulator";
+        return "Uncalibrated Hardware";
       default:
         return "Standard Radio Adapter";
     }

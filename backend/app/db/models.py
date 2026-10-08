@@ -31,7 +31,7 @@ class CollectorModel(Base):
     public_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     capabilities: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
     last_seen: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.fromtimestamp(0, timezone.utc)
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
@@ -361,6 +361,7 @@ class LanHostModel(Base):
     is_self: Mapped[bool] = mapped_column(Boolean, default=False)
     is_gateway: Mapped[bool] = mapped_column(Boolean, default=False)
     quality_flags: Mapped[List[str]] = mapped_column(JSON, default=list)
+    open_ports: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list)
     last_seen: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

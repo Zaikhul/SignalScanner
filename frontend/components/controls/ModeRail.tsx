@@ -1,12 +1,12 @@
 "use client";
 
 import React from "react";
-import { WifiHigh, Bluetooth, Radio, Sparkle } from "@phosphor-icons/react";
+import { WifiHigh, Bluetooth, Radio } from "@phosphor-icons/react";
 import { useScannerStore } from "@/lib/store";
 import { ScanMode } from "@/lib/types";
 
 export function ModeRail() {
-  const { mode, setMode, activeSession, simulationMode, setSimulationMode } = useScannerStore();
+  const { mode, setMode, activeSession } = useScannerStore();
   const isScanning = activeSession?.status === "active";
 
   const modes: { id: ScanMode; label: string; icon: React.ReactNode; desc: string }[] = [
@@ -70,29 +70,15 @@ export function ModeRail() {
         </div>
       </div>
 
-      {/* Simulator / Hardware Toggle */}
+      {/* Hardware RF Mode Indicator */}
       <div className="p-3 rounded-[var(--radius-control)] bg-[var(--color-surface)] border border-white/10 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Sparkle size={16} className={simulationMode ? "text-[var(--color-signal)]" : "text-zinc-500"} />
+        <div className="flex items-center gap-2.5">
+          <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
           <div>
-            <div className="text-xs font-medium text-zinc-200">Mode Simulasi</div>
-            <div className="text-[10px] text-zinc-500">Virtual RF & beacon generator</div>
+            <div className="text-xs font-medium text-zinc-200">Pengukuran Hardware Riil</div>
+            <div className="text-[10px] text-zinc-500">Live OS Wi-Fi & adapter telemetry</div>
           </div>
         </div>
-        <button
-          type="button"
-          disabled={isScanning}
-          onClick={() => setSimulationMode(!simulationMode)}
-          className={`w-9 h-5 rounded-full p-0.5 transition-colors ${
-            simulationMode ? "bg-[var(--color-signal)]" : "bg-zinc-800 border border-white/10"
-          }`}
-        >
-          <div
-            className={`w-4 h-4 rounded-full bg-zinc-950 transition-transform ${
-              simulationMode ? "translate-x-4" : "translate-x-0"
-            }`}
-          />
-        </button>
       </div>
     </div>
   );

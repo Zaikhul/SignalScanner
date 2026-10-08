@@ -282,6 +282,12 @@ export interface WifiAssociation {
   created_at: string;
 }
 
+export interface PortInfo {
+  port: number;
+  service: string;
+  state: "open" | "filtered" | "closed";
+}
+
 export interface LanHost {
   id?: number;
   ip: string;
@@ -295,6 +301,7 @@ export interface LanHost {
   is_self: boolean;
   is_gateway: boolean;
   quality_flags: string[];
+  open_ports?: PortInfo[];
   last_seen: string;
 }
 

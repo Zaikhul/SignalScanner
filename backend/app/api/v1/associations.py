@@ -10,7 +10,9 @@ from app.schemas.association import (
     DisconnectAssociationRequest,
     IngestAssociationStatusRequest,
     IngestHostBatchRequest,
+    LanHostItem,
     LanHostListResponse,
+    ScanHostPortsRequest,
 )
 from app.core.security import verify_collector_auth
 from app.services.association_service import association_service
@@ -87,6 +89,22 @@ async def list_association_hosts(
         db, association_id, page=page, page_size=page_size
     )
     return LanHostListResponse(association_id=association_id, items=items, total=total)
+
+
+@router.post(
+    "/associations/{association_id}/hosts/{host_ip}/scan-ports",
+    response_model=LanHostItem,
+)
+async def scan_host_ports(
+    association_id: str,
+    host_ip: str,
+    payload: ScanHostPortsRequest = ScanHostPortsRequest(),
+    db: AsyncSession = Depends(get_db),
+):
+    """Scan open TCP ports on a discovered LAN host within the authorized attached prefix."""
+    return await association_service.scan_host_ports(
+        db, association_id, host_ip, ports=payload.ports, timeout=payload.timeout_seconds
+    )
 
 
 @router.post("/associations/{association_id}/exports")

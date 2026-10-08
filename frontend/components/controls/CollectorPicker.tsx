@@ -1,47 +1,79 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { HardDrives, CheckCircle, WarningCircle, RadioButton, CircleNotch } from "@phosphor-icons/react";
+import {
+  HardDrives,
+  CheckCircle,
+  WarningCircle,
+  RadioButton,
+  CircleNotch,
+  ArrowsClockwise,
+} from "@phosphor-icons/react";
 import { apiClient } from "@/lib/apiClient";
 import { useScannerStore } from "@/lib/store";
 import { Collector, CollectorStatus } from "@/lib/types";
 
 export function CollectorPicker() {
-  const { selectedCollectorId, setSelectedCollectorId, setCollectors, collectors } = useScannerStore();
-  const [loading, setLoading] = useState(true);
+  const {
+    selectedCollectorId,
+    setSelectedCollectorId,
+    setCollectors,
+    collectors,
+  } = useScannerStore();
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const loadCollectors = React.useCallback(async (isManual: boolean = false) => {
+    if (isManual) setIsRefreshing(true);
+    try {
+      const list = await apiClient.listCollectors();
+      setCollectors(list);
+      // Ensure selected collector is strictly col_default (Local Host Collector)
+      setSelectedCollectorId("col_default");
+    } catch (e) {
+      console.debug("Failed to poll collectors", e);
+    } finally {
+      if (isManual) {
+        setTimeout(() => setIsRefreshing(false), 600);
+      }
+    }
+  }, [setCollectors, setSelectedCollectorId]);
 
   useEffect(() => {
     let isMounted = true;
+    loadCollectors(false);
 
-    async function loadCollectors() {
-      try {
-        const list = await apiClient.listCollectors();
-        if (isMounted) {
-          setCollectors(list);
-          if (list.length > 0 && (!selectedCollectorId || selectedCollectorId === "col_default")) {
-            const active = list.find((c) => c.status === "ready" || c.status === "busy") || list[0];
-            setSelectedCollectorId(active.id);
-          }
-        }
-      } catch (e) {
-        console.debug("Failed to poll collectors", e);
-      } finally {
-        if (isMounted) setLoading(false);
-      }
-    }
-
-    loadCollectors();
-    // Poll every 3 seconds for dynamic auto-discovery of newly started daemons
-    const interval = setInterval(loadCollectors, 3000);
+    // Poll every 3 seconds for dynamic auto-discovery of local collector status
+    const interval = setInterval(() => {
+      if (isMounted) loadCollectors(false);
+    }, 3000);
 
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [setCollectors, setSelectedCollectorId, selectedCollectorId]);
+  }, [loadCollectors]);
 
-  const selected = collectors.find((c) => c.id === selectedCollectorId) || collectors[0];
-  const rawStatus = (selected?.status || "offline") as CollectorStatus;
+  // Dedicated single Local Host Collector
+  const localCollector = collectors.find((c) => c.id === "col_default") || collectors[0] || {
+    id: "col_default",
+    name: "Local Host Collector",
+    platform: "windows",
+    version: "1.0.0",
+    status: "ready" as CollectorStatus,
+    capabilities: {
+      supported_modes: ["wifi", "bluetooth", "radio"],
+      adapters: [],
+      platform: "windows",
+      version: "1.0.0",
+      can_wifi: true,
+      can_ble: true,
+      can_sdr: true,
+    },
+    last_seen: new Date().toISOString(),
+    created_at: new Date().toISOString(),
+  };
+
+  const rawStatus = (localCollector?.status || "ready") as CollectorStatus;
 
   // Helper to render badge styles & text
   const getStatusBadge = (status: CollectorStatus) => {
@@ -86,28 +118,51 @@ export function CollectorPicker() {
 
   return (
     <div className="space-y-2">
-      <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider block">
-        Perangkat Collector
-      </label>
+      <div className="flex items-center justify-between">
+        <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider block">
+          Perangkat Collector
+        </label>
+        <button
+          type="button"
+          onClick={() => loadCollectors(true)}
+          disabled={isRefreshing}
+          className="text-zinc-400 hover:text-zinc-200 transition flex items-center gap-1 text-[11px] disabled:opacity-50 cursor-pointer"
+          title="Pindai ulang koneksi daemon collector lokal"
+        >
+          <ArrowsClockwise size={12} className={isRefreshing ? "animate-spin text-[var(--color-signal)]" : ""} />
+          <span>Segarkan</span>
+        </button>
+      </div>
 
-      <div className="p-3 rounded-[var(--radius-control)] bg-[var(--color-surface)] border border-white/10 space-y-2">
+      <div className="p-3 rounded-[var(--radius-control)] bg-[var(--color-surface)] border border-white/10 space-y-2.5">
+        {/* Collector Identity Card */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <HardDrives size={16} className="text-zinc-400" />
-            <span className="text-xs font-medium text-zinc-200">
-              {selected?.name || "Local Host Scanner"}
-            </span>
+            <div className="p-1.5 rounded bg-white/5 text-zinc-300">
+              <HardDrives size={16} />
+            </div>
+            <div>
+              <div className="text-xs font-semibold text-zinc-100 font-sans">
+                {localCollector?.name || "Local Host Collector"}
+              </div>
+              <div className="text-[10px] font-mono text-zinc-500">
+                ID: {localCollector?.id || "col_default"}
+              </div>
+            </div>
           </div>
-          <div className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded border text-[10px] font-mono font-medium ${badge.colorClass}`}>
+          <div
+            className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded border text-[10px] font-mono font-medium ${badge.colorClass}`}
+          >
             {badge.icon}
             <span>{badge.label}</span>
           </div>
         </div>
 
+        {/* Local Hardware Adapters Summary */}
         <div className="grid grid-cols-3 gap-1 pt-1 text-[10px] font-mono text-zinc-400 border-t border-white/5">
           <div>
-            <span className="text-zinc-500 block">OS:</span>
-            <span className="text-zinc-300 capitalize">{selected?.platform || "Windows"}</span>
+            <span className="text-zinc-500 block">Platform:</span>
+            <span className="text-zinc-300 capitalize">{localCollector?.platform || "Windows"}</span>
           </div>
           <div>
             <span className="text-zinc-500 block">WiFi:</span>

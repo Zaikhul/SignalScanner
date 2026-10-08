@@ -43,20 +43,27 @@ export function useWebScanStream(scanId: string | null, enabled: boolean = true)
     let isCancelled = false;
     lastSequenceRef.current = 0;
 
+    const targetScanId = scanId;
+
     function reconcileTerminalData() {
-      if (!scanId || isCancelled) return;
+      if (!targetScanId) return;
       webScanApiClient
-        .getSnapshot(scanId)
+        .getSnapshot(targetScanId)
         .then((snap) => {
-          if (!isCancelled && snap) {
+          const currentJob = useWebScanStore.getState().activeJob;
+          if ((!currentJob || currentJob.id === targetScanId) && snap) {
             setSnapshot(snap);
+            if (snap.job) {
+              setActiveJob(snap.job);
+            }
           }
         })
         .catch(() => {});
       webScanApiClient
-        .listFindings(scanId, { limit: 200 })
+        .listFindings(targetScanId, { limit: 200 })
         .then((res) => {
-          if (!isCancelled && res && res.items) {
+          const currentJob = useWebScanStore.getState().activeJob;
+          if ((!currentJob || currentJob.id === targetScanId) && res && res.items) {
             setFindings(res.items);
           }
         })
@@ -99,7 +106,7 @@ export function useWebScanStream(scanId: string | null, enabled: boolean = true)
           if (nextStatus === "completed") {
             setProgress(100, "completed");
           }
-          // Auto-reconcile findings and snapshot on completion (F-12)
+          // Auto-reconcile findings and snapshot on terminal state (F-12)
           reconcileTerminalData();
         }
       } else if (type === "finding_upserted" && payload) {
@@ -117,6 +124,12 @@ export function useWebScanStream(scanId: string | null, enabled: boolean = true)
         const currentJob = useWebScanStore.getState().activeJob;
         if (currentJob) {
           setActiveJob({ ...currentJob, status: "cancelled" });
+        }
+        reconcileTerminalData();
+      } else if (type === "partial" && payload) {
+        const currentJob = useWebScanStore.getState().activeJob;
+        if (currentJob) {
+          setActiveJob({ ...currentJob, status: "partial" });
         }
         reconcileTerminalData();
       } else if (type === "failed" && payload) {

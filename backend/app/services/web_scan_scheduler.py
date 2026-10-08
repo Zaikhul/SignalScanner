@@ -400,7 +400,11 @@ class WebScanScheduler:
                 terminal_event_type = (
                     "completed"
                     if final_state in (ScanState.COMPLETED, ScanState.SUCCESS)
-                    else ("cancelled" if final_state in (ScanState.CANCELLED, ScanState.CANCELLING) else "failed")
+                    else (
+                        "cancelled"
+                        if final_state in (ScanState.CANCELLED, ScanState.CANCELLING)
+                        else ("partial" if final_state == ScanState.PARTIAL else "failed")
+                    )
                 )
                 await event_sink(
                     WebScanEvent(

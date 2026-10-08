@@ -10,7 +10,7 @@ import {
 
 export type ViewMode = "globe" | "list" | "split";
 
-export function useWebScanGeography(scanId: string | null) {
+export function useWebScanGeography(scanId: string | null, scanStatus?: string | null) {
   const [data, setData] = useState<WebScanGeographyResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -19,11 +19,14 @@ export function useWebScanGeography(scanId: string | null) {
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [basisFilter, setBasisFilter] = useState<string>("all");
   const [viewMode, setViewMode] = useState<ViewMode>("split");
-  const [webglSupported, setWebglSupported] = useState<boolean>(true);
+  const [canvasSupported, setCanvasSupported] = useState<boolean>(true);
 
-  // Keep track of the currently active scanId to prevent race conditions
+  // Keep track of the currently active scanId to prevent race conditions (T04)
   const activeScanRef = useRef<string | null>(scanId);
   activeScanRef.current = scanId;
+
+  // Track if terminal refetch has occurred for the current scanId (T05)
+  const terminalRefetchedRef = useRef<string | null>(null);
 
   const fetchGeography = useCallback(async (targetId: string) => {
     setLoading(true);
@@ -35,7 +38,7 @@ export function useWebScanGeography(scanId: string | null) {
       }
     } catch (err: any) {
       if (activeScanRef.current === targetId) {
-        setError(err.message || "Failed to load scan geography data");
+        setError(err.message || "Gagal memuat dataset hubungan geografis");
       }
     } finally {
       if (activeScanRef.current === targetId) {
@@ -53,11 +56,26 @@ export function useWebScanGeography(scanId: string | null) {
       return;
     }
 
+    // Immediately clear previous scan's data and reset all filters (T04, T06)
+    setData(null);
     setSelectedRelationId(null);
     setSearchQuery("");
     setStatusFilter("all");
+    setBasisFilter("all");
+    setError(null);
+
     fetchGeography(scanId);
   }, [scanId, fetchGeography]);
+
+  // Terminal lifecycle trigger: auto-refresh geography once terminal observations are stored (T05)
+  useEffect(() => {
+    if (!scanId) return;
+    const isTerminal = ["completed", "partial", "failed", "cancelled"].includes(scanStatus || "");
+    if (isTerminal && terminalRefetchedRef.current !== scanId) {
+      terminalRefetchedRef.current = scanId;
+      fetchGeography(scanId);
+    }
+  }, [scanId, scanStatus, fetchGeography]);
 
   const endpointsById = useMemo(() => {
     const map = new Map<string, GeoEndpoint>();
@@ -102,7 +120,7 @@ export function useWebScanGeography(scanId: string | null) {
         if (statusFilter === "5xx" && !rel.status_codes.some((c) => c >= 500)) return false;
       }
 
-      // Relation Basis Filter
+      // Relation Basis Filter (T06)
       if (basisFilter !== "all" && rel.relation_basis !== basisFilter) {
         return false;
       }
@@ -111,10 +129,11 @@ export function useWebScanGeography(scanId: string | null) {
     });
   }, [data?.relations, endpointsById, searchQuery, statusFilter, basisFilter]);
 
+  // Reconcile selection against filtered relations (T06)
   const selectedRelation = useMemo(() => {
-    if (!selectedRelationId || !data?.relations) return null;
-    return data.relations.find((r) => r.id === selectedRelationId) || null;
-  }, [selectedRelationId, data?.relations]);
+    if (!selectedRelationId || !filteredRelations) return null;
+    return filteredRelations.find((r) => r.id === selectedRelationId) || null;
+  }, [selectedRelationId, filteredRelations]);
 
   const clearFilters = useCallback(() => {
     setSearchQuery("");
@@ -137,8 +156,11 @@ export function useWebScanGeography(scanId: string | null) {
     setBasisFilter,
     viewMode,
     setViewMode,
-    webglSupported,
-    setWebglSupported,
+    canvasSupported,
+    setCanvasSupported,
+    // Alias webglSupported for backwards compatibility
+    webglSupported: canvasSupported,
+    setWebglSupported: setCanvasSupported,
     filteredRelations,
     endpointsById,
     clearFilters,

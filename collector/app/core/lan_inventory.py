@@ -190,6 +190,9 @@ class LanInventoryEngine(LanInventoryAdapter):
                     host["hostname"] = hostname
                     host["discovery_methods"].append("mdns")
 
+        # 6. Safe lightweight port audit for common LAN services
+        await self._probe_hosts_ports(hosts_map)
+
         yield HostBatch(
             association_id="assoc",
             session_id="session",
@@ -257,6 +260,41 @@ class LanInventoryEngine(LanInventoryAdapter):
             return await asyncio.wait_for(asyncio.to_thread(_get_name), timeout=0.8)
         except Exception:
             return None
+
+    async def _probe_hosts_ports(self, hosts_map: Dict[str, Dict[str, Any]]) -> None:
+        top_ports = [22, 53, 80, 443, 445, 631, 3389, 8080]
+        port_names = {
+            22: "SSH",
+            53: "DNS",
+            80: "HTTP",
+            443: "HTTPS",
+            445: "SMB",
+            631: "IPP",
+            3389: "RDP",
+            8080: "HTTP-Proxy",
+        }
+        sem = asyncio.Semaphore(10)
+
+        async def _check_port(ip: str, port: int) -> Optional[Dict[str, Any]]:
+            async with sem:
+                try:
+                    _, writer = await asyncio.wait_for(
+                        asyncio.open_connection(ip, port),
+                        timeout=0.4,
+                    )
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except Exception:
+                        pass
+                    return {"port": port, "service": port_names.get(port, "Unknown"), "state": "open"}
+                except Exception:
+                    return None
+
+        for ip_str, host in hosts_map.items():
+            tasks = [_check_port(ip_str, p) for p in top_ports]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            host["open_ports"] = [r for r in results if isinstance(r, dict) and r is not None]
 
 
 lan_inventory_engine = LanInventoryEngine()

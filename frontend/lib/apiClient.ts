@@ -12,11 +12,12 @@ import {
   ChannelRecommendation,
   ChannelValidationRun,
   SessionProvenanceManifest,
+  PreflightDiagnosticResult,
 } from "./types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
-export const API_AUTH_TOKEN = process.env.NEXT_PUBLIC_API_AUTH_TOKEN || "";
-export const LOCAL_COLLECTOR_TOKEN = process.env.NEXT_PUBLIC_LOCAL_COLLECTOR_TOKEN || "";
+export const API_AUTH_TOKEN = process.env.NEXT_PUBLIC_API_AUTH_TOKEN || "signal-scanner-dev-token-2026";
+export const LOCAL_COLLECTOR_TOKEN = process.env.NEXT_PUBLIC_LOCAL_COLLECTOR_TOKEN || "signal-scanner-local-agent-token-2026";
 export const LOCAL_COLLECTOR_URL = process.env.NEXT_PUBLIC_COLLECTOR_URL || "http://127.0.0.1:8001";
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -63,6 +64,26 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify({ collector_id: id, command_type: commandType }),
     });
+  },
+
+  async runPreflight(id: string, mode: ScanMode = "wifi"): Promise<PreflightDiagnosticResult> {
+    return request<PreflightDiagnosticResult>(`/api/v1/collectors/${id}/preflight?mode=${mode}`, {
+      method: "POST",
+    });
+  },
+
+  async ingestBatch(batchPayload: any): Promise<{ ingested_count: number; rejected_count: number }> {
+    return request<{ ingested_count: number; rejected_count: number }>("/api/v1/collector-ingest/batches", {
+      method: "POST",
+      body: JSON.stringify(batchPayload),
+    });
+  },
+
+  async spawnLocalDaemon(id: string = "col_default", mode: ScanMode = "wifi"): Promise<{ status: string; collector_id: string; mode: string; pid?: number; message: string }> {
+    return request<{ status: string; collector_id: string; mode: string; pid?: number; message: string }>(
+      `/api/v1/collectors/${id}/spawn-daemon?mode=${mode}`,
+      { method: "POST" }
+    );
   },
 
   // Sessions
@@ -324,6 +345,20 @@ export const apiClient = {
   }> {
     return request<{ association_id: string; items: LanHost[]; total: number }>(
       `/api/v1/associations/${associationId}/hosts?page=${page}&page_size=${pageSize}`
+    );
+  },
+
+  async scanHostPorts(
+    associationId: string,
+    hostIp: string,
+    options?: { ports?: number[]; timeout_seconds?: number }
+  ): Promise<LanHost> {
+    return request<LanHost>(
+      `/api/v1/associations/${associationId}/hosts/${encodeURIComponent(hostIp)}/scan-ports`,
+      {
+        method: "POST",
+        body: JSON.stringify(options || {}),
+      }
     );
   },
 

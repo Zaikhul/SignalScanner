@@ -27,6 +27,9 @@ async def ensure_db_init():
             WebScanJobModel,
             WebScanScopeModel,
         )
+        from app.db.models import CollectorModel, AdapterModel
+        await session.execute(AdapterModel.__table__.delete().where(AdapterModel.collector_id != "col_default"))
+        await session.execute(CollectorModel.__table__.delete().where(CollectorModel.id != "col_default"))
         for model in (
             WebScanFindingModel,
             WebScanObservationModel,
@@ -39,6 +42,11 @@ async def ensure_db_init():
             await session.execute(model.__table__.delete())
         await session.commit()
     yield
+    async with AsyncSessionLocal() as session:
+        from app.db.models import CollectorModel, AdapterModel
+        await session.execute(AdapterModel.__table__.delete().where(AdapterModel.collector_id != "col_default"))
+        await session.execute(CollectorModel.__table__.delete().where(CollectorModel.id != "col_default"))
+        await session.commit()
 
 
 @pytest.fixture(autouse=True)

@@ -2,6 +2,7 @@
 
 import React, { useState } from "react";
 import { PreflightDiagnosticResult, DiagnosticStatus, ScanMode } from "@/lib/types";
+import { apiClient } from "@/lib/apiClient";
 import {
   CheckCircle,
   Warning,
@@ -30,6 +31,8 @@ export function CapabilityPreflightSheet({
   onProceedToScan,
 }: CapabilityPreflightSheetProps) {
   const [loading, setLoading] = useState(false);
+  const [spawning, setSpawning] = useState(false);
+  const [spawnMsg, setSpawnMsg] = useState<string | null>(null);
   const [result, setResult] = useState<PreflightDiagnosticResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,13 +40,7 @@ export function CapabilityPreflightSheet({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/v1/collectors/${collectorId}/preflight?mode=${mode}`, {
-        method: "POST",
-      });
-      if (!res.ok) {
-        throw new Error(`Preflight failed with HTTP ${res.status}`);
-      }
-      const data: PreflightDiagnosticResult = await res.json();
+      const data = await apiClient.runPreflight(collectorId, mode as ScanMode);
       setResult(data);
     } catch (e: any) {
       setError(e.message || "Failed to execute preflight diagnostics");
@@ -51,6 +48,22 @@ export function CapabilityPreflightSheet({
       setLoading(false);
     }
   }, [collectorId, mode]);
+
+  const handleSpawnDaemon = async () => {
+    setSpawning(true);
+    setSpawnMsg(null);
+    try {
+      const res = await apiClient.spawnLocalDaemon(collectorId, mode);
+      setSpawnMsg(res.message || "Collector daemon berhasil dijalankan di background.");
+      setTimeout(() => {
+        runPreflight();
+      }, 1500);
+    } catch (e: any) {
+      setError(e.message || "Gagal menyalakan collector daemon lokal");
+    } finally {
+      setSpawning(false);
+    }
+  };
 
   React.useEffect(() => {
     if (isOpen && collectorId) {
@@ -143,6 +156,12 @@ export function CapabilityPreflightSheet({
             </div>
           )}
 
+          {spawnMsg && (
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-300 font-mono">
+              {spawnMsg}
+            </div>
+          )}
+
           {result && !loading && (
             <>
               <div className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900/60 p-3.5">
@@ -178,8 +197,23 @@ export function CapabilityPreflightSheet({
                       </p>
                     )}
                     {c.remediation_step && (
-                      <div className="mt-2 rounded border border-amber-500/20 bg-amber-500/5 p-2 text-xs text-amber-300/90 ml-6.5">
-                        <strong>Langkah Remediasi:</strong> {c.remediation_step}
+                      <div className="mt-2 rounded border border-amber-500/20 bg-amber-500/5 p-2.5 text-xs text-amber-300/90 ml-6.5 space-y-2">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                          <div className="flex-1">
+                            <strong>Langkah Remediasi:</strong> {c.remediation_step}
+                          </div>
+                          {c.name === "collector_heartbeat_liveness" && c.status !== "READY" && (
+                            <button
+                              type="button"
+                              onClick={handleSpawnDaemon}
+                              disabled={spawning}
+                              className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded bg-cyan-500 text-zinc-950 hover:bg-cyan-400 disabled:opacity-50 transition-colors shadow-sm"
+                            >
+                              <ArrowClockwise size={13} className={spawning ? "animate-spin" : ""} />
+                              {spawning ? "Menyalakan..." : "⚡ Nyalakan Daemon (1-Click)"}
+                            </button>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -190,14 +224,27 @@ export function CapabilityPreflightSheet({
         </div>
 
         <div className="flex items-center justify-between border-t border-zinc-800 pt-4">
-          <button
-            onClick={runPreflight}
-            disabled={loading}
-            className="flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-800 px-3.5 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-700 transition-colors disabled:opacity-50"
-          >
-            <ArrowClockwise size={14} className={loading ? "animate-spin" : ""} />
-            Uji Ulang
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={runPreflight}
+              disabled={loading || spawning}
+              className="flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-800 px-3.5 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-700 transition-colors disabled:opacity-50"
+            >
+              <ArrowClockwise size={14} className={loading ? "animate-spin" : ""} />
+              Uji Ulang
+            </button>
+            {result?.checks.some((c) => c.name === "collector_heartbeat_liveness" && c.status !== "READY") && (
+              <button
+                type="button"
+                onClick={handleSpawnDaemon}
+                disabled={spawning || loading}
+                className="flex items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-950/40 px-3 py-2 text-xs font-medium text-cyan-300 hover:bg-cyan-900/50 transition-colors disabled:opacity-50"
+              >
+                <ArrowClockwise size={13} className={spawning ? "animate-spin" : ""} />
+                {spawning ? "Menyalakan Daemon..." : "⚡ Nyalakan Daemon Lokal"}
+              </button>
+            )}
+          </div>
 
           <div className="flex items-center gap-2">
             <button

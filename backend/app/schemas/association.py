@@ -86,6 +86,14 @@ class AssociationEventResponse(BaseModel):
     timestamp: datetime
 
 
+class PortInfo(BaseModel):
+    port: int = Field(..., ge=1, le=65535, description="TCP port number")
+    service: Optional[str] = Field(default="unknown", description="Identified service name")
+    state: str = Field(default="open", description="Port state (open, closed, filtered)")
+    protocol: str = Field(default="tcp", description="Transport protocol")
+    banner: Optional[str] = Field(default=None, description="Optional service banner excerpt")
+
+
 class LanHostItem(BaseModel):
     id: Optional[int] = None
     ip: str
@@ -99,7 +107,21 @@ class LanHostItem(BaseModel):
     is_self: bool = False
     is_gateway: bool = False
     quality_flags: List[str] = Field(default_factory=list)
+    open_ports: List[PortInfo] = Field(default_factory=list, description="Discovered open ports on this host")
     last_seen: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ScanHostPortsRequest(BaseModel):
+    ports: Optional[List[int]] = Field(
+        default=None,
+        description="Optional list of specific TCP ports to scan (max 50 ports). Defaults to standard common LAN ports.",
+    )
+    timeout_seconds: float = Field(
+        default=0.5,
+        ge=0.1,
+        le=2.0,
+        description="Connection timeout per port in seconds",
+    )
 
 
 class LanHostListResponse(BaseModel):

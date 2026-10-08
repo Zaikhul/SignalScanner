@@ -5,7 +5,6 @@ import {
   ArrowRight,
   Globe,
   Question,
-  ShieldCheck,
   WarningCircle,
 } from "@phosphor-icons/react";
 import { GeoEndpoint, GeoRelation } from "@/lib/webScanTypes";
@@ -57,6 +56,31 @@ export function WebScanRelationList({
     );
   }
 
+  const getBasisBadge = (basis: string) => {
+    switch (basis) {
+      case "observed_http":
+        return {
+          label: "HTTP Teramati",
+          className: "bg-blue-950/60 border-blue-500/30 text-blue-400",
+        };
+      case "transport_attempt":
+        return {
+          label: "Percobaan Transport",
+          className: "bg-amber-950/60 border-amber-500/30 text-amber-400",
+        };
+      case "configured_target":
+        return {
+          label: "Target Konfigurasi",
+          className: "bg-zinc-800/80 border-zinc-700 text-zinc-300",
+        };
+      default:
+        return {
+          label: basis,
+          className: "bg-zinc-800 border-zinc-700 text-zinc-400",
+        };
+    }
+  };
+
   return (
     <div
       role="region"
@@ -72,6 +96,8 @@ export function WebScanRelationList({
         const targetLocText = targetLoc
           ? [targetLoc.city, targetLoc.country].filter(Boolean).join(", ")
           : "Lokasi tidak diketahui";
+
+        const basisBadge = getBasisBadge(rel.relation_basis);
 
         return (
           <div
@@ -104,8 +130,14 @@ export function WebScanRelationList({
                 </span>
               </div>
 
-              {/* Status Codes & Record count badge */}
+              {/* Status Codes, Relation Basis & Record count badge */}
               <div className="flex items-center gap-2 shrink-0 text-xs">
+                <span
+                  className={`px-1.5 py-0.5 rounded font-mono text-[10px] border ${basisBadge.className}`}
+                >
+                  {basisBadge.label}
+                </span>
+
                 {rel.status_codes.map((sc) => {
                   const badgeColor =
                     sc >= 200 && sc < 300

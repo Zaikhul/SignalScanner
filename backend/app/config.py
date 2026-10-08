@@ -55,10 +55,14 @@ class Settings(BaseSettings):
 
     # Web Scan Geography & Executor Identification
     WEB_SCAN_EXECUTOR_ORIGIN_ID: str = os.getenv("WEB_SCAN_EXECUTOR_ORIGIN_ID", "scanner-backend-worker-1")
-    WEB_SCAN_EXECUTOR_LATITUDE: Optional[float] = float(os.getenv("WEB_SCAN_EXECUTOR_LATITUDE", "-6.2088")) if os.getenv("WEB_SCAN_EXECUTOR_LATITUDE") else -6.2088
-    WEB_SCAN_EXECUTOR_LONGITUDE: Optional[float] = float(os.getenv("WEB_SCAN_EXECUTOR_LONGITUDE", "106.8456")) if os.getenv("WEB_SCAN_EXECUTOR_LONGITUDE") else 106.8456
-    WEB_SCAN_EXECUTOR_COUNTRY: str = os.getenv("WEB_SCAN_EXECUTOR_COUNTRY", "Indonesia")
-    WEB_SCAN_EXECUTOR_CITY: str = os.getenv("WEB_SCAN_EXECUTOR_CITY", "Jakarta")
+    WEB_SCAN_EXECUTOR_LATITUDE: Optional[float] = (
+        float(os.getenv("WEB_SCAN_EXECUTOR_LATITUDE")) if os.getenv("WEB_SCAN_EXECUTOR_LATITUDE") else None
+    )
+    WEB_SCAN_EXECUTOR_LONGITUDE: Optional[float] = (
+        float(os.getenv("WEB_SCAN_EXECUTOR_LONGITUDE")) if os.getenv("WEB_SCAN_EXECUTOR_LONGITUDE") else None
+    )
+    WEB_SCAN_EXECUTOR_COUNTRY: Optional[str] = os.getenv("WEB_SCAN_EXECUTOR_COUNTRY")
+    WEB_SCAN_EXECUTOR_CITY: Optional[str] = os.getenv("WEB_SCAN_EXECUTOR_CITY")
     WEB_SCAN_GEOGRAPHY_ENABLED: bool = os.getenv("WEB_SCAN_GEOGRAPHY_ENABLED", "true").lower() in ("true", "1", "yes")
 
 

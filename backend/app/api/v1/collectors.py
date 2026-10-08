@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -103,35 +106,45 @@ async def run_preflight_diagnostics(
     overall_status = DiagnosticStatus.READY
 
     # 1. Collector heartbeat check
-    last_seen = collector.last_seen
-    if last_seen.tzinfo is None:
-        last_seen = last_seen.replace(tzinfo=timezone.utc)
-    heartbeat_age = (datetime.now(timezone.utc) - last_seen).total_seconds()
-    if heartbeat_age <= 10.0:
-        checks.append(DiagnosticCheckItem(
-            layer="collector",
-            name="collector_heartbeat_liveness",
-            status=DiagnosticStatus.READY,
-            message=f"Collector is actively reporting heartbeats (age: {heartbeat_age:.1f}s).",
-        ))
-    elif heartbeat_age <= 30.0:
-        overall_status = DiagnosticStatus.DEGRADED
-        checks.append(DiagnosticCheckItem(
-            layer="collector",
-            name="collector_heartbeat_liveness",
-            status=DiagnosticStatus.DEGRADED,
-            message=f"Collector heartbeat is delayed (age: {heartbeat_age:.1f}s).",
-            remediation_step="Check network connection between collector daemon and backend.",
-        ))
-    else:
+    if not collector.last_seen or collector.last_seen.year <= 1970:
         overall_status = DiagnosticStatus.BLOCKED
         checks.append(DiagnosticCheckItem(
             layer="collector",
             name="collector_heartbeat_liveness",
             status=DiagnosticStatus.BLOCKED,
-            message=f"Collector is offline (last seen {heartbeat_age:.0f}s ago).",
-            remediation_step="Start the collector daemon using 'python -m collector.app.main --mode wifi'.",
+            message="Daemon collector lokal belum aktif (belum pernah mengirim heartbeat).",
+            remediation_step=f"Jalankan daemon collector lokal menggunakan perintah: 'python -m collector.app.main --mode {mode}' atau klik tombol Nyalakan Daemon.",
         ))
+    else:
+        last_seen = collector.last_seen
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        heartbeat_age = (datetime.now(timezone.utc) - last_seen).total_seconds()
+        if heartbeat_age <= 15.0:
+            checks.append(DiagnosticCheckItem(
+                layer="collector",
+                name="collector_heartbeat_liveness",
+                status=DiagnosticStatus.READY,
+                message=f"Daemon collector lokal aktif dan merespon heartbeat secara real-time ({heartbeat_age:.1f}s).",
+            ))
+        elif heartbeat_age <= 45.0:
+            overall_status = DiagnosticStatus.DEGRADED
+            checks.append(DiagnosticCheckItem(
+                layer="collector",
+                name="collector_heartbeat_liveness",
+                status=DiagnosticStatus.DEGRADED,
+                message=f"Heartbeat collector lokal mengalami penundaan ({heartbeat_age:.1f}s).",
+                remediation_step=f"Periksa apakah proses daemon 'python -m collector.app.main --mode {mode}' sedang sibuk memindai kanal radio atau restart daemon.",
+            ))
+        else:
+            overall_status = DiagnosticStatus.BLOCKED
+            checks.append(DiagnosticCheckItem(
+                layer="collector",
+                name="collector_heartbeat_liveness",
+                status=DiagnosticStatus.BLOCKED,
+                message=f"Daemon collector lokal offline (terakhir terlihat {heartbeat_age:.0f}s yang lalu).",
+                remediation_step=f"Jalankan daemon collector lokal menggunakan perintah: 'python -m collector.app.main --mode {mode}'.",
+            ))
 
     # 2. Database persistence check
     try:
@@ -211,3 +224,67 @@ async def run_collector_diagnostic(
     """Execute safe hardware/permission diagnostics on a collector."""
     cmd.collector_id = collector_id
     return await collector_service.execute_diagnostic(db, cmd)
+
+
+_active_daemon_process: Optional[subprocess.Popen] = None
+
+
+@router.post("/{collector_id}/spawn-daemon")
+async def spawn_local_daemon(
+    collector_id: str,
+    mode: str = Query("wifi", pattern="^(wifi|bluetooth|radio)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Spawns or verifies the local collector daemon process (1-Click Local Run).
+    """
+    global _active_daemon_process
+    collector = await collector_service.get_collector_by_id(db, collector_id)
+    if not collector:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Collector '{collector_id}' not found.",
+        )
+
+    # Check if a previously spawned process is still running
+    if _active_daemon_process is not None and _active_daemon_process.poll() is None:
+        return {
+            "status": "already_running",
+            "collector_id": collector_id,
+            "mode": mode,
+            "pid": _active_daemon_process.pid,
+            "message": "Daemon collector lokal sudah aktif berjalan di latar belakang.",
+        }
+
+    # Root repository directory (4 levels up from backend/app/api/v1)
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+    cmd = [
+        sys.executable,
+        "-m",
+        "collector.app.main",
+        "--mode",
+        mode,
+        "--interval",
+        "500",
+    ]
+
+    try:
+        _active_daemon_process = subprocess.Popen(
+            cmd,
+            cwd=root_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return {
+            "status": "started",
+            "collector_id": collector_id,
+            "mode": mode,
+            "pid": _active_daemon_process.pid,
+            "message": f"Daemon collector lokal berhasil dijalankan (PID {_active_daemon_process.pid}).",
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Gagal menjalankan daemon collector lokal: {e}",
+        )
+

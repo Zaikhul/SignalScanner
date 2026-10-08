@@ -401,7 +401,7 @@ class WebScanEvent(BaseModel):
     occurred_at: datetime
     type: Literal[
         "snapshot", "state_changed", "progress", "finding_upserted",
-        "observation_added", "error_added", "completed", "cancelled", "failed"
+        "observation_added", "error_added", "completed", "cancelled", "failed", "partial"
     ]
     payload: Any
 

@@ -269,7 +269,8 @@ export interface WebScanEvent {
     | "error_added"
     | "completed"
     | "cancelled"
-    | "failed";
+    | "failed"
+    | "partial";
   payload: any;
 }
 

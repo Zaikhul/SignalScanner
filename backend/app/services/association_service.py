@@ -387,6 +387,10 @@ class AssociationService:
                     set(existing.discovery_methods + h.discovery_methods)
                 )
                 existing.quality_flags = list(set(existing.quality_flags + h.quality_flags))
+                if h.open_ports:
+                    existing.open_ports = [
+                        p.model_dump() if hasattr(p, "model_dump") else p for p in h.open_ports
+                    ]
             else:
                 new_host = LanHostModel(
                     association_id=association_id,
@@ -402,6 +406,9 @@ class AssociationService:
                     is_self=h.is_self,
                     is_gateway=h.is_gateway,
                     quality_flags=h.quality_flags,
+                    open_ports=[
+                        p.model_dump() if hasattr(p, "model_dump") else p for p in h.open_ports
+                    ] if h.open_ports else [],
                     last_seen=now,
                 )
                 db.add(new_host)
@@ -472,11 +479,111 @@ class AssociationService:
                 is_self=h.is_self,
                 is_gateway=h.is_gateway,
                 quality_flags=h.quality_flags,
+                open_ports=h.open_ports or [],
                 last_seen=h.last_seen,
             )
             for h in hosts
         ]
         return items, total
+
+    @staticmethod
+    async def scan_host_ports(
+        db: AsyncSession,
+        association_id: str,
+        host_ip: str,
+        ports: Optional[List[int]] = None,
+        timeout: float = 0.5,
+    ) -> LanHostItem:
+        """
+        Executes bounded, safe TCP port scan on an authorized LAN host within the attached prefix.
+        Updates database and notifies frontend via WebSocket.
+        """
+        assoc_res = await db.execute(
+            select(WifiAssociationModel).where(WifiAssociationModel.id == association_id)
+        )
+        assoc = assoc_res.scalar_one_or_none()
+        if not assoc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Association '{association_id}' not found",
+            )
+
+        # Strict Scope Validation Gate
+        from app.core.lan_port_scanner import lan_port_scanner, validate_lan_target
+
+        try:
+            validate_lan_target(host_ip, attached_prefix=assoc.prefix)
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+        # Retrieve target host from DB
+        host_res = await db.execute(
+            select(LanHostModel).where(
+                LanHostModel.association_id == association_id,
+                LanHostModel.ip == host_ip,
+            )
+        )
+        host = host_res.scalar_one_or_none()
+        if not host:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Host '{host_ip}' not found in association '{association_id}'",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            )
+
+        # Run non-blocking async port scan
+        open_ports = await lan_port_scanner.scan_host_ports(
+            ip=host_ip,
+            ports=ports,
+            timeout=timeout,
+            attached_prefix=assoc.prefix,
+        )
+
+        now = datetime.now(timezone.utc)
+        host.open_ports = open_ports
+        host.last_seen = now
+        methods = list(host.discovery_methods)
+        if "port_scan" not in methods:
+            methods.append("port_scan")
+        host.discovery_methods = methods
+
+        await db.commit()
+        await db.refresh(host)
+
+        host_item = LanHostItem(
+            id=host.id,
+            ip=host.ip,
+            ip_version=host.ip_version,
+            hostname=host.hostname,
+            mac_hash=host.mac_hash,
+            oui_vendor=host.oui_vendor,
+            discovery_methods=host.discovery_methods,
+            reachability=host.reachability,
+            rtt_ms=host.rtt_ms,
+            is_self=host.is_self,
+            is_gateway=host.is_gateway,
+            quality_flags=host.quality_flags,
+            open_ports=host.open_ports or [],
+            last_seen=host.last_seen,
+        )
+
+        # Broadcast update over WebSocket
+        await stream_engine.publish_event(
+            assoc.session_id,
+            {
+                "schema_version": "1.1",
+                "type": "inventory.host_updated",
+                "session_id": assoc.session_id,
+                "association_id": association_id,
+                "captured_at": now.isoformat(),
+                "host": host_item.model_dump(mode="json"),
+            },
+        )
+
+        return host_item
 
     @staticmethod
     async def export_inventory(
@@ -512,9 +619,14 @@ class AssociationService:
                 "rtt_ms",
                 "is_self",
                 "is_gateway",
+                "open_ports",
                 "last_seen",
             ])
             for h in hosts:
+                ports_str = ", ".join(
+                    f"{p.get('port')}/{p.get('service', 'unknown')}"
+                    for p in (h.open_ports or [])
+                )
                 writer.writerow([
                     h.ip,
                     h.ip_version,
@@ -526,6 +638,7 @@ class AssociationService:
                     h.rtt_ms if h.rtt_ms is not None else "",
                     h.is_self,
                     h.is_gateway,
+                    ports_str,
                     h.last_seen.isoformat(),
                 ])
             content = output.getvalue()
@@ -542,6 +655,7 @@ class AssociationService:
                     "rtt_ms": h.rtt_ms,
                     "is_self": h.is_self,
                     "is_gateway": h.is_gateway,
+                    "open_ports": h.open_ports or [],
                     "last_seen": h.last_seen.isoformat(),
                 }
                 for h in hosts

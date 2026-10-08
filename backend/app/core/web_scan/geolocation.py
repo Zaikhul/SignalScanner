@@ -236,53 +236,8 @@ class OfflineGeoIPService:
                 level = "city" if data.get("city") else "country"
                 return point, level, "located", "ip_lookup_estimate", None
 
-        # General IANA Regional Fallback based on first octet
-        if isinstance(ip, ipaddress.IPv4Address):
-            first_octet = int(ip_str.split(".")[0])
-            if first_octet < 127:
-                # North America / ARIN generic
-                point = GeoPoint(
-                    latitude=37.751,
-                    longitude=-97.822,
-                    city=None,
-                    region=None,
-                    country="United States",
-                    country_code="US",
-                )
-                return point, "country", "located", "ip_lookup_estimate", None
-            elif 128 <= first_octet < 192:
-                # Europe / RIPE generic
-                point = GeoPoint(
-                    latitude=50.8503,
-                    longitude=4.3517,
-                    city=None,
-                    region=None,
-                    country="European Union",
-                    country_code="EU",
-                )
-                return point, "country", "located", "ip_lookup_estimate", None
-            else:
-                # Global generic
-                point = GeoPoint(
-                    latitude=1.3521,
-                    longitude=103.8198,
-                    city=None,
-                    region=None,
-                    country="Asia-Pacific",
-                    country_code="AP",
-                )
-                return point, "country", "located", "ip_lookup_estimate", None
-
-        # IPv6 Generic Global Point
-        point = GeoPoint(
-            latitude=37.751,
-            longitude=-97.822,
-            city=None,
-            region=None,
-            country="Global Anycast",
-            country_code="US",
-        )
-        return point, "country", "located", "ip_lookup_estimate", None
+        # Public IP not present in offline verified database: report unknown rather than inventing coordinates
+        return None, "unknown", "unknown", "unknown", "IP address not found in verified offline database"
 
     @classmethod
     def resolve_source_endpoint(cls, config_settings: Any = None) -> GeoEndpoint:
