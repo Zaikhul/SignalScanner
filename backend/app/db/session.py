@@ -35,6 +35,14 @@ async def init_db() -> None:
 
         def sync_upgrade_columns(sync_conn):
             from sqlalchemy import inspect, text
+            
+            # Enable WAL mode for high concurrency
+            try:
+                sync_conn.execute(text("PRAGMA journal_mode=WAL;"))
+                sync_conn.execute(text("PRAGMA synchronous=NORMAL;"))
+            except Exception:
+                pass
+                
             inspector = inspect(sync_conn)
             if "measurements" in inspector.get_table_names():
                 existing_cols = {c["name"] for c in inspector.get_columns("measurements")}

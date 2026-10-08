@@ -27,6 +27,7 @@ async def ingest_measurement_batch(
     except ValueError as ve:
         await db.rollback()
         err_msg = str(ve)
+        logger.error(f"Ingest rejected: {err_msg} | payload session_id: {batch.session_id}")
         if "not found" in err_msg.lower():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

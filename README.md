@@ -25,8 +25,10 @@ Sistem instrumen pengukuran kekuatan sinyal multi-mode real-time dengan antarmuk
   - Pseudonimisasi BSSID & alamat MAC menggunakan HMAC tenant-scoped sebelum persistensi/transmisi.
   - Tidak menyimpan isi paket komunikasi (*receive-only*).
   - Redaksi query sensitif pada rekaman temuan dan live event stream.
-- **Resilient Streaming**:
+- **Resilient Streaming & Concurrency**:
   - Komunikasi data real-time berbasis WebSocket dengan sequence tracking, gap recovery, dan buffer offline SQLite (`aiosqlite`) dengan antrean *dead-letter* pada collector saat jaringan terputus.
+  - Mode **SQLite WAL (Write-Ahead Logging)** aktif otomatis pada backend untuk mengeliminasi *lock contention* dan penundaan saat pembuatan sesi baru secara bersamaan dengan operasi polling.
+  - Mekanisme **Startup Auto-Retry (15x)** pada daemon collector untuk menjamin sinkronisasi otomatis yang tangguh saat seluruh subsistem dihidupkan bersamaan.
 - **Riwayat & Ekspor Data**:
   - Manajemen sesi (Mulai, Jeda, Lanjut, Selesai, Tambah Marker Kejadian).
   - Ekspor dataset ke format **JSON** dan **RFC-4180 CSV** berstandar schema v1.0 dengan checksum SHA-256 dan verifikasi otentikasi unduhan.

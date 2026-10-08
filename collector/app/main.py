@@ -101,18 +101,21 @@ class CollectorDaemon:
             },
         }
 
-        try:
-            async with httpx.AsyncClient(base_url=self.backend_url, timeout=5.0) as client:
-                res = await client.post("/api/v1/collectors/register", json=payload, headers=self._headers())
-                if res.status_code == 200:
-                    logger.info(f"Successfully registered collector '{collector_settings.COLLECTOR_ID}' with backend")
-                    return True
-                else:
-                    logger.warning(f"Registration returned status {res.status_code}: {res.text}")
-                    return False
-        except Exception as e:
-            logger.warning(f"Could not connect to backend for registration: {e}")
-            return False
+        for attempt in range(1, 16):
+            try:
+                async with httpx.AsyncClient(base_url=self.backend_url, timeout=5.0) as client:
+                    res = await client.post("/api/v1/collectors/register", json=payload, headers=self._headers())
+                    if res.status_code == 200:
+                        logger.info(f"Successfully registered collector '{collector_settings.COLLECTOR_ID}' with backend")
+                        return True
+                    else:
+                        logger.warning(f"Registration returned status {res.status_code}: {res.text}")
+            except Exception as e:
+                logger.warning(f"Registration attempt {attempt}/15 failed: {repr(e)}. Retrying in 2s...")
+            await asyncio.sleep(2.0)
+            
+        logger.error("Failed to register collector after 15 attempts. Proceeding in offline/isolated mode.")
+        return False
 
     async def ack_command(self, command_id: str) -> bool:
         """Idempotently acknowledges a received command."""
@@ -297,7 +300,7 @@ class CollectorDaemon:
                         for cmd in pending_cmds:
                             await self.handle_command(cmd, use_mock=use_mock)
             except Exception as e:
-                logger.debug(f"Heartbeat loop error: {e}")
+                logger.error(f"Heartbeat loop error: {repr(e)}")
 
             await asyncio.sleep(collector_settings.HEARTBEAT_INTERVAL_SECONDS)
 
