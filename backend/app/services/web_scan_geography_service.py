@@ -30,6 +30,34 @@ MANDATORY_DISCLAIMER = (
     "bukan rute paket atau lokasi fisik yang terverifikasi."
 )
 
+SEVERITY_RANK: Dict[str, int] = {
+    "critical": 5,
+    "high": 4,
+    "medium": 3,
+    "low": 2,
+    "info": 1,
+    "none": 0,
+}
+
+
+def _compute_finding_summary(
+    finding_ids: List[str],
+    findings_by_id: Dict[str, WebScanFindingModel],
+) -> Tuple[str, Dict[str, int]]:
+    # Menghitung tingkat keparahan tertinggi dan distribusi jumlah temuan untuk suatu relasi/endpoint.
+    counts: Dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    highest = "none"
+    for fid in finding_ids:
+        f_obj = findings_by_id.get(fid)
+        if not f_obj:
+            continue
+        sev = (f_obj.severity or "info").lower()
+        if sev in counts:
+            counts[sev] += 1
+        if SEVERITY_RANK.get(sev, 0) > SEVERITY_RANK.get(highest, 0):
+            highest = sev
+    return highest, {k: v for k, v in counts.items() if v > 0}
+
 
 class WebScanGeographyService:
     """Orchestrates scan relationship graph, endpoint geolocation enrichment, and coverage metrics."""
@@ -70,6 +98,7 @@ class WebScanGeographyService:
         )
         res_find = await db.execute(find_stmt)
         findings = res_find.scalars().all()
+        findings_by_id: Dict[str, WebScanFindingModel] = {f.id: f for f in findings}
 
         obs_to_findings: Dict[str, Set[str]] = {}
         for f in findings:
@@ -86,6 +115,7 @@ class WebScanGeographyService:
         source_ep = OfflineGeoIPService.resolve_source_endpoint(settings)
         endpoints_map: Dict[str, GeoEndpoint] = {source_ep.id: source_ep}
         relations_map: Dict[Tuple[str, str], GeoRelation] = {}
+        latency_samples_by_rel: Dict[Tuple[str, str], List[float]] = {}
 
         eligible_records_count = 0
 
@@ -132,7 +162,7 @@ class WebScanGeographyService:
                 address_basis = "unresolved"
 
             target_key = target_ip or host or "unresolved_target"
-            target_ep_id = f"tgt_{target_key.replace('.', '_').replace(':', '_')}"
+            target_ep_id = f"tgt_{target_key.replace(".", "_").replace(":", "_")}"
 
             if target_ep_id not in endpoints_map:
                 geo_point, level, status, basis, reason = OfflineGeoIPService.lookup_target_ip(target_ip)
@@ -149,14 +179,36 @@ class WebScanGeographyService:
                     location_status=status,
                     status_reason=reason,
                     provider_info="Offline GeoIP Registry v2026.1" if status == "located" else None,
+                    hostnames=[host] if host else [],
                 )
+            else:
+                if host and host not in endpoints_map[target_ep_id].hostnames:
+                    endpoints_map[target_ep_id].hostnames.append(host)
 
             # Map into relationship
             rel_key = (source_ep.id, target_ep_id)
             sc = data.get("status_code")
             meth = data.get("method") or "GET"
 
+            elapsed = data.get("elapsed_ms")
+            if elapsed is None:
+                elapsed = data.get("latency_ms")
+            if elapsed is not None:
+                try:
+                    latency_samples_by_rel.setdefault(rel_key, []).append(float(elapsed))
+                except (ValueError, TypeError):
+                    pass
+
+            b_val = data.get("decompressed_bytes") or data.get("response_bytes") or data.get("content_length") or 0
+            try:
+                b_count = int(b_val)
+            except (ValueError, TypeError):
+                b_count = 0
+
+            obs_at = obs.observed_at
+
             linked_fids = list(obs_to_findings.get(obs.id, set()))
+            obs_mod = getattr(obs, "module", None)
 
             if rel_key not in relations_map:
                 relations_map[rel_key] = GeoRelation(
@@ -171,6 +223,10 @@ class WebScanGeographyService:
                     methods=[meth] if meth else [],
                     supporting_observation_ids=[obs.id],
                     linked_finding_ids=linked_fids,
+                    module_ids=[obs_mod] if obs_mod else [],
+                    total_bytes=b_count,
+                    first_observed_at=obs_at,
+                    last_observed_at=obs_at,
                 )
             else:
                 rel = relations_map[rel_key]
@@ -184,17 +240,27 @@ class WebScanGeographyService:
                 for fid in linked_fids:
                     if fid not in rel.linked_finding_ids:
                         rel.linked_finding_ids.append(fid)
+                if obs_mod and obs_mod not in rel.module_ids:
+                    rel.module_ids.append(obs_mod)
+                rel.total_bytes += b_count
+                if obs_at:
+                    if not rel.first_observed_at or obs_at < rel.first_observed_at:
+                        rel.first_observed_at = obs_at
+                    if not rel.last_observed_at or obs_at > rel.last_observed_at:
+                        rel.last_observed_at = obs_at
 
         # 6. Fallback if scan has no observations yet or empty
         if not relations_map:
-            # Handle empty scan or scan with target configured only
             parsed_tgt = urlsplit(job.normalized_target if "://" in job.normalized_target else f"http://{job.normalized_target}")
             tgt_host = parsed_tgt.hostname or job.target_display
             is_valid_ip, _ = OfflineGeoIPService.parse_ip(tgt_host)
             ip_val = tgt_host if is_valid_ip else None
             geo_point, level, status, basis, reason = OfflineGeoIPService.lookup_target_ip(ip_val)
 
-            fallback_tgt_id = f"tgt_{tgt_host.replace('.', '_').replace(':', '_')}"
+            fallback_tgt_id = f"tgt_{tgt_host.replace(".", "_").replace(":", "_")}"
+            fallback_finding_count = len(findings)
+            fallback_highest_sev, _ = _compute_finding_summary([f.id for f in findings], findings_by_id)
+
             endpoints_map[fallback_tgt_id] = GeoEndpoint(
                 id=fallback_tgt_id,
                 role="target",
@@ -208,7 +274,40 @@ class WebScanGeographyService:
                 location_status=status,
                 status_reason=reason or "Configured scan target with no recorded HTTP observations yet",
                 provider_info="Offline GeoIP Registry v2026.1" if status == "located" else None,
+                hostnames=[tgt_host] if tgt_host else [],
+                highest_severity=fallback_highest_sev,  # type: ignore[assignment]
+                finding_count=fallback_finding_count,
             )
+        else:
+            # Jika semua temuan berasal dari domain target utama namun belum memiliki observation_ids spesifik,
+            # kaitkan pada relasi utama jika hanya ada 1 target endpoint:
+            if len(relations_map) == 1 and findings:
+                only_rel = next(iter(relations_map.values()))
+                if not only_rel.linked_finding_ids:
+                    only_rel.linked_finding_ids = [f.id for f in findings]
+
+            for rel_key, rel in relations_map.items():
+                latencies = latency_samples_by_rel.get(rel_key, [])
+                if latencies:
+                    rel.avg_latency_ms = round(sum(latencies) / len(latencies), 1)
+                    rel.max_latency_ms = round(max(latencies), 1)
+
+                highest_sev, sev_counts = _compute_finding_summary(rel.linked_finding_ids, findings_by_id)
+                rel.highest_severity = highest_sev  # type: ignore[assignment]
+                rel.finding_counts = sev_counts
+
+            # Agregasi temuan ke setiap target endpoint
+            ep_findings_map: Dict[str, Set[str]] = {}
+            for rel in relations_map.values():
+                if rel.target_endpoint_id in endpoints_map:
+                    ep_findings_map.setdefault(rel.target_endpoint_id, set()).update(rel.linked_finding_ids)
+
+            for ep_id, fids in ep_findings_map.items():
+                tgt_ep = endpoints_map.get(ep_id)
+                if tgt_ep:
+                    tgt_ep.finding_count = len(fids)
+                    highest_sev, _ = _compute_finding_summary(list(fids), findings_by_id)
+                    tgt_ep.highest_severity = highest_sev  # type: ignore[assignment]
 
         endpoints_list = list(endpoints_map.values())
         relations_list = list(relations_map.values())

@@ -158,6 +158,30 @@ def sanitize_target_for_display(url: str) -> str:
         return url
 
 
+SENSITIVE_PARAM_NAMES = {
+    "token", "access_token", "refresh_token", "api_key", "apikey",
+    "key", "secret", "client_secret", "password", "pass", "pwd",
+    "auth", "bearer", "sig", "signature", "credential",
+}
+
+
+def mask_sensitive_query_params(url: str) -> str:
+    """Masks only sensitive parameter values in a URL, preserving harmless functional parameters (F07)."""
+    try:
+        parts = urlsplit(url)
+        if not parts.query:
+            return url
+        pairs = parse_qsl(parts.query, keep_blank_values=True)
+        masked_pairs = [
+            (k, "<redacted>" if k.lower() in SENSITIVE_PARAM_NAMES else v)
+            for k, v in pairs
+        ]
+        masked_query = urlencode(masked_pairs)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, masked_query, ""))
+    except Exception:
+        return url
+
+
 def redact_url_query_params(url: str) -> str:
     """Authoritative helper for redacting query strings across evidence, telemetry, logs, and exports."""
     return sanitize_target_for_display(url)

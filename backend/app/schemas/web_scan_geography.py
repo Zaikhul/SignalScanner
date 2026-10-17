@@ -5,6 +5,9 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
+SeverityLevel = Literal["critical", "high", "medium", "low", "info", "none"]
+
+
 class GeoPoint(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -37,6 +40,10 @@ class GeoEndpoint(BaseModel):
     location_status: Literal["located", "unknown", "unsupported", "lookup_failed", "disallowed"] = "unknown"
     status_reason: Optional[str] = None
     provider_info: Optional[str] = None
+    # Enriched telemetry & security fields (v1.1 backward-compatible)
+    hostnames: List[str] = Field(default_factory=list)
+    highest_severity: SeverityLevel = "none"
+    finding_count: int = 0
 
 
 class GeoRelation(BaseModel):
@@ -53,6 +60,15 @@ class GeoRelation(BaseModel):
     methods: List[str] = Field(default_factory=list)
     supporting_observation_ids: List[str] = Field(default_factory=list)
     linked_finding_ids: List[str] = Field(default_factory=list)
+    module_ids: List[str] = Field(default_factory=list, description="Contributing scan modules (F10)")
+    # Enriched telemetry & security fields (v1.1 backward-compatible)
+    avg_latency_ms: Optional[float] = None
+    max_latency_ms: Optional[float] = None
+    total_bytes: int = 0
+    highest_severity: SeverityLevel = "none"
+    finding_counts: Dict[str, int] = Field(default_factory=dict)
+    first_observed_at: Optional[datetime] = None
+    last_observed_at: Optional[datetime] = None
 
 
 class GeoCoverage(BaseModel):

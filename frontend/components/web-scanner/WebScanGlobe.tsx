@@ -1,13 +1,35 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowsClockwise,
   Crosshair,
   MagnifyingGlassMinus,
   MagnifyingGlassPlus,
+  Play,
+  Pause,
+  ShieldWarning,
+  Pulse,
+  Stack,
+  HardDrives,
+  GlobeHemisphereWest,
+  MapTrifold,
+  Cube,
 } from "@phosphor-icons/react";
-import { GeoEndpoint, GeoRelation } from "@/lib/webScanTypes";
+import { GeoEndpoint, GeoRelation, Severity } from "@/lib/webScanTypes";
+import { useWebScanStore } from "@/lib/webScanStore";
+import {
+  buildActiveFindingSeverityMap,
+  clusterTargetEndpoints,
+  GlobeColorMode,
+} from "@/lib/globeMath";
+import { WebScanGlobeThree, GlobeVisualPreset } from "@/lib/WebScanGlobeThree";
+import {
+  buildGlobeGeometries,
+  GlobeGeometrySet,
+  R_GLOBE,
+  R_LAND,
+} from "@/lib/globeGeographyMesh";
 
 interface WebScanGlobeProps {
   endpointsById: Map<string, GeoEndpoint>;
@@ -15,23 +37,43 @@ interface WebScanGlobeProps {
   selectedRelationId: string | null;
   onSelectRelation: (id: string | null) => void;
   onCanvasError?: () => void;
-  onWebglError?: () => void; // alias for backwards compatibility
+  onWebglError?: () => void;
 }
 
-// Major continent reference dots to provide visual geographic landmasses on the globe
-const CONTINENT_DOTS: [number, number][] = [
-  // North America
-  [45, -100], [55, -115], [35, -95], [38, -122], [40, -74], [60, -135], [25, -80], [30, -105],
-  // South America
-  [-15, -55], [-23, -46], [-34, -58], [-0, -60], [-10, -75], [-40, -65],
-  // Europe
-  [48, 2], [52, 13], [55, 37], [40, -3], [41, 12], [59, 18], [60, 10], [51, 0], [45, 25],
-  // Africa
-  [0, 20], [9, 8], [-26, 28], [30, 31], [15, 30], [-1, 37], [-18, 25],
-  // Asia
-  [35, 105], [55, 80], [28, 77], [35, 139], [31, 121], [1, 103], [13, 100], [-6, 106],
-  // Australia / Oceania
-  [-25, 135], [-33, 151], [-37, 144], [-31, 115], [-41, 174],
+// ─────────────────────────────────────────────────────────────────────────────
+// Real Earth geography assets — Natural Earth (public domain, CC0 1.0),
+// redistributed via `world-atlas` (ISC) and served as LOCAL STATIC FILES from
+// `frontend/public/geo/`. No CDN or tile server is contacted at runtime.
+//
+// Resolution is documented honestly:
+//   110m (default) — ~125 land polygons / 126 rings / 1 Caspian hole;
+//                    177 country features incl. the Lesotho enclave hole.
+//                    Covers the 13 major Indonesian islands, Japan, the
+//                    Philippines, UK, NZ, Madagascar, Cuba, Fiji, …
+//                    Micro-islands below the 1:110m threshold (Singapore,
+//                    Malta) are not separated.
+//   50m            — ~1,400 polygons; separates small islands and micro-states
+//                    (Bali, Bangka, Belitung, Madura, Singapore, Malta…).
+//                    Regenerate with `node scripts/generate-geo-assets.mjs 50m`
+//                    and flip GEO_RESOLUTION to "50m" — no code change needed.
+// ─────────────────────────────────────────────────────────────────────────────
+const GEO_RESOLUTION = "110m" as "110m" | "50m";
+const GEO_BASE = "/geo";
+
+const REGION_JUMPS: {
+  id: "nusantara" | "asia_pacific" | "europe" | "americas";
+  label: string;
+}[] = [
+  { id: "nusantara", label: "Nusantara" },
+  { id: "asia_pacific", label: "Asia-Pasifik" },
+  { id: "europe", label: "Eropa" },
+  { id: "americas", label: "Amerika" },
+];
+
+const PRESETS: { id: GlobeVisualPreset; label: string }[] = [
+  { id: "hex_matrix", label: "Hex-Matrix" },
+  { id: "night_ops", label: "Night Ops" },
+  { id: "wireframe", label: "Wireframe" },
 ];
 
 export function WebScanGlobe({
@@ -42,609 +84,669 @@ export function WebScanGlobe({
   onCanvasError,
   onWebglError,
 }: WebScanGlobeProps) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const engineRef = useRef<WebScanGlobeThree | null>(null);
 
-  // Rotation angles (radians)
-  const [rotX, setRotX] = useState<number>(0.2); // pitch / tilt
-  const [rotY, setRotY] = useState<number>(-1.5); // yaw / longitude
-  const [zoom, setZoom] = useState<number>(1.0);
+  const { findings } = useWebScanStore();
+
+  // UI state (mirrors engine state)
+  const [colorMode, setColorMode] = useState<GlobeColorMode>("severity");
+  const [visualPreset, setVisualPreset] = useState<GlobeVisualPreset>("hex_matrix");
+  const [showBorders, setShowBorders] = useState<boolean>(true);
+  const [autoOrbit, setAutoOrbit] = useState<boolean>(false);
+  const [zoomDisplay, setZoomDisplay] = useState<number>(1.05);
+  const [isReady, setIsReady] = useState<boolean>(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [geometryStats, setGeometryStats] = useState<{
+    polygons: number;
+    holes: number;
+    landTriangles: number;
+  } | null>(null);
+
+  const [hoveredRelationId, setHoveredRelationId] = useState<string | null>(null);
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
   const [dimensions, setDimensions] = useState<{ width: number; height: number }>({
     width: 0,
     height: 0,
   });
 
-  const isDraggingRef = useRef(false);
-  const dragDistanceRef = useRef(0);
-  const lastMousePos = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const reducedMotionRef = useRef(false);
 
-  // Check prefers-reduced-motion
+  // F09: triage contract — false_positive / resolved findings are suppressed
+  // so they never raise the severity colour of pillars, arcs, or clusters.
+  const findingSeveritiesById = useMemo(
+    () =>
+      buildActiveFindingSeverityMap(
+        findings.map((f) => ({
+          id: f.id,
+          severity: f.severity,
+          triage_status: f.triage_status ?? null,
+        }))
+      ),
+    [findings]
+  );
+
+  // Relations whose endpoints have no honest coordinates (RFC 1918 / unmapped).
+  // These are NEVER given fake coordinates on the sphere.
+  const unlocatedRelations = useMemo(() => {
+    return relations.filter((rel) => {
+      const src = endpointsById.get(rel.source_endpoint_id);
+      const tgt = endpointsById.get(rel.target_endpoint_id);
+      return !src?.location || !tgt?.location;
+    });
+  }, [relations, endpointsById]);
+
+  const mappedTargetCount = useMemo(
+    () => clusterTargetEndpoints(relations, endpointsById, findingSeveritiesById).length,
+    [relations, endpointsById, findingSeveritiesById]
+  );
+
+  // Detect prefers-reduced-motion
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-      reducedMotionRef.current = media.matches;
-      const listener = (e: MediaQueryListEvent) => {
-        reducedMotionRef.current = e.matches;
-      };
-      media.addEventListener("change", listener);
-      return () => media.removeEventListener("change", listener);
-    }
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    reducedMotionRef.current = media.matches;
+    const listener = (e: MediaQueryListEvent) => {
+      reducedMotionRef.current = e.matches;
+    };
+    media.addEventListener("change", listener);
+    return () => media.removeEventListener("change", listener);
   }, []);
 
-  // ResizeObserver for reliable container tracking across DPR and layout shifts
+  // ResizeObserver for container responsiveness
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
         if (width > 0 && height > 0) {
           setDimensions({ width: Math.floor(width), height: Math.floor(height) });
+          engineRef.current?.resize(Math.floor(width), Math.floor(height));
         }
       }
     });
-
     observer.observe(container);
     return () => observer.disconnect();
   }, []);
 
-  // Center camera on selected relation with exact mathematics:
-  // rotY = -longitude, rotX = -latitude
-  const focusRelation = useCallback(
-    (relId: string) => {
-      const rel = relations.find((r) => r.id === relId);
-      if (!rel) return;
-      const tgt = endpointsById.get(rel.target_endpoint_id);
-      if (tgt?.location) {
-        const targetRotY = -((tgt.location.longitude * Math.PI) / 180);
-        const targetRotX = Math.max(
-          -1.4,
-          Math.min(1.4, -((tgt.location.latitude * Math.PI) / 180))
-        );
-
-        if (reducedMotionRef.current) {
-          setRotY(targetRotY);
-          setRotX(targetRotX);
-        } else {
-          // Smooth interpolated rotation
-          let step = 0;
-          const startY = rotY;
-          const startX = rotX;
-          let diffY = ((targetRotY - startY + Math.PI) % (2 * Math.PI)) - Math.PI;
-          if (diffY < -Math.PI) diffY += 2 * Math.PI;
-          const diffX = targetRotX - startX;
-
-          const anim = () => {
-            step += 0.1;
-            if (step >= 1) {
-              setRotY(targetRotY);
-              setRotX(targetRotX);
-            } else {
-              const ease = 1 - Math.pow(1 - step, 2);
-              setRotY(startY + diffY * ease);
-              setRotX(startX + diffX * ease);
-              requestAnimationFrame(anim);
-            }
-          };
-          requestAnimationFrame(anim);
-        }
-      }
-    },
-    [relations, endpointsById, rotX, rotY]
-  );
-
-  useEffect(() => {
-    if (selectedRelationId) {
-      focusRelation(selectedRelationId);
-    }
-  }, [selectedRelationId, focusRelation]);
-
-  // Main Canvas Render Loop
+  // ── Engine bootstrap: create renderer, then load real geography ──────────
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
 
-    const width = dimensions.width || containerRef.current?.clientWidth || 600;
-    const height = dimensions.height || containerRef.current?.clientHeight || 420;
-    const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    const reducedMotion =
+      typeof window !== "undefined" && window.matchMedia
+        ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        : false;
 
-    canvas.width = Math.round(width * dpr);
-    canvas.height = Math.round(height * dpr);
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
-
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
+    let engine: WebScanGlobeThree;
+    try {
+      engine = new WebScanGlobeThree({
+        canvas,
+        container,
+        endpointsById,
+        relations,
+        selectedRelationId,
+        colorMode: "severity",
+        visualPreset: "hex_matrix",
+        showBorders: true,
+        autoOrbit: false,
+        reducedMotion,
+        onSelectRelation,
+        onHoverChange: (relationId, _clusterKey, pos) => {
+          setHoveredRelationId(relationId);
+          setTooltipPos(pos);
+        },
+        onError: () => {
+          onCanvasError?.();
+          onWebglError?.();
+        },
+      });
+    } catch {
       onCanvasError?.();
       onWebglError?.();
       return;
     }
 
-    // Set high-DPI transform so all drawing logic is expressed in CSS pixels
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    engineRef.current = engine;
 
-    const cx = width / 2;
-    const cy = height / 2;
-    const radius = Math.min(width, height) * 0.38 * zoom;
+    // Load Natural Earth assets from local static files (offline-first).
+    let cancelled = false;
+    const loadGeography = async () => {
+      try {
+        const [landRes, borderRes] = await Promise.all([
+          fetch(`${GEO_BASE}/ne_${GEO_RESOLUTION}_land.geojson`),
+          fetch(`${GEO_BASE}/ne_${GEO_RESOLUTION}_admin_0_boundary_lines.geojson`),
+        ]);
 
-    ctx.clearRect(0, 0, width, height);
+        if (!landRes.ok) {
+          throw new Error(`Geography asset unavailable (HTTP ${landRes.status})`);
+        }
 
-    // 1. Globe Sphere Outer Glow & Background
-    const glowGrad = ctx.createRadialGradient(cx, cy, radius * 0.8, cx, cy, radius * 1.25);
-    glowGrad.addColorStop(0, "rgba(59, 130, 246, 0.12)");
-    glowGrad.addColorStop(0.7, "rgba(59, 130, 246, 0.03)");
-    glowGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
-    ctx.fillStyle = glowGrad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius * 1.25, 0, Math.PI * 2);
-    ctx.fill();
+        const landGeo = await landRes.json();
+        let borderLines: number[][][] | undefined;
+        if (borderRes.ok) {
+          const borderGeo = await borderRes.json();
+          // MultiLineString → coordinates; tolerate missing/alternate shapes.
+          if (borderGeo?.type === "MultiLineString" && Array.isArray(borderGeo.coordinates)) {
+            borderLines = borderGeo.coordinates;
+          } else if (borderGeo?.type === "Feature" && borderGeo.geometry?.type === "MultiLineString") {
+            borderLines = borderGeo.geometry.coordinates;
+          } else if (
+            borderGeo?.type === "FeatureCollection" &&
+            Array.isArray(borderGeo.features)
+          ) {
+            const merged: number[][][] = [];
+            for (const feat of borderGeo.features) {
+              const g = feat?.geometry;
+              if (g?.type === "MultiLineString") merged.push(...g.coordinates);
+              else if (g?.type === "LineString") merged.push(g.coordinates);
+            }
+            borderLines = merged;
+          }
+        }
 
-    // Sphere Body
-    const sphereGrad = ctx.createRadialGradient(
-      cx - radius * 0.3,
-      cy - radius * 0.3,
-      radius * 0.1,
-      cx,
-      cy,
-      radius
-    );
-    sphereGrad.addColorStop(0, "#18181b"); // zinc-900
-    sphereGrad.addColorStop(0.8, "#09090b"); // zinc-950
-    sphereGrad.addColorStop(1, "#030712");
-    ctx.fillStyle = sphereGrad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.fill();
+        if (cancelled) return;
 
-    // Sphere Border
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-
-    // Helper: 3D point projection to screen (returns CSS pixels)
-    const project = (
-      lat: number,
-      lon: number,
-      altitudeOffset = 0
-    ): { x: number; y: number; visible: boolean; z: number } => {
-      const phi = (lat * Math.PI) / 180;
-      const lambda = (lon * Math.PI) / 180;
-      const r = radius + altitudeOffset;
-
-      const x0 = r * Math.cos(phi) * Math.sin(lambda);
-      const y0 = -r * Math.sin(phi);
-      const z0 = r * Math.cos(phi) * Math.cos(lambda);
-
-      // Rotate around Y-axis (rotY)
-      const cosY = Math.cos(rotY);
-      const sinY = Math.sin(rotY);
-      const x1 = x0 * cosY + z0 * sinY;
-      const z1 = -x0 * sinY + z0 * cosY;
-
-      // Rotate around X-axis (rotX)
-      const cosX = Math.cos(rotX);
-      const sinX = Math.sin(rotX);
-      const y2 = y0 * cosX - z1 * sinX;
-      const z2 = y0 * sinX + z1 * cosX;
-
-      return {
-        x: cx + x1,
-        y: cy + y2,
-        visible: z2 > 0,
-        z: z2,
-      };
+        const geometries: GlobeGeometrySet = buildGlobeGeometries(landGeo, borderLines);
+        engine.applyGeometries(geometries);
+        setGeometryStats({
+          polygons: geometries.stats.polygons,
+          holes: geometries.stats.holes,
+          landTriangles: geometries.stats.landTriangles,
+        });
+        setIsReady(true);
+      } catch (err) {
+        if (cancelled) return;
+        setLoadError(
+          err instanceof Error ? err.message : "Gagal memuat aset geografi Natural Earth."
+        );
+      }
     };
 
-    // 2. Graticules (Latitude & Longitude grid lines)
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.04)";
-    ctx.lineWidth = 1;
+    void loadGeography();
 
-    // Longitude lines every 45 deg
-    for (let lon = -180; lon < 180; lon += 45) {
-      ctx.beginPath();
-      let started = false;
-      for (let lat = -80; lat <= 80; lat += 5) {
-        const pt = project(lat, lon);
-        if (pt.visible) {
-          if (!started) {
-            ctx.moveTo(pt.x, pt.y);
-            started = true;
-          } else {
-            ctx.lineTo(pt.x, pt.y);
-          }
-        } else {
-          started = false;
-        }
-      }
-      ctx.stroke();
-    }
+    return () => {
+      cancelled = true;
+      engine.destroy();
+      engineRef.current = null;
+    };
+    // Engine is created once; subsequent prop changes flow through the effects below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    // Latitude lines every 30 deg
-    for (let lat = -60; lat <= 60; lat += 30) {
-      ctx.beginPath();
-      let started = false;
-      for (let lon = -180; lon <= 180; lon += 5) {
-        const pt = project(lat, lon);
-        if (pt.visible) {
-          if (!started) {
-            ctx.moveTo(pt.x, pt.y);
-            started = true;
-          } else {
-            ctx.lineTo(pt.x, pt.y);
-          }
-        } else {
-          started = false;
-        }
-      }
-      ctx.stroke();
-    }
-
-    // 3. Continent Reference Dots
-    ctx.fillStyle = "rgba(161, 161, 170, 0.35)"; // zinc-400 subtle
-    for (const [lat, lon] of CONTINENT_DOTS) {
-      const pt = project(lat, lon);
-      if (pt.visible) {
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, 2.5, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-
-    // 4. Arcs (Relations)
-    for (const rel of relations) {
-      const isSelected = rel.id === selectedRelationId;
-      const sourceEp = endpointsById.get(rel.source_endpoint_id);
-      const targetEp = endpointsById.get(rel.target_endpoint_id);
-
-      if (!sourceEp?.location || !targetEp?.location) {
-        continue; // PRD FR-08: Busur hanya dibuat jika kedua endpoint memiliki lokasi
-      }
-
-      const lat1 = sourceEp.location.latitude;
-      const lon1 = sourceEp.location.longitude;
-      const lat2 = targetEp.location.latitude;
-      const lon2 = targetEp.location.longitude;
-
-      // Shortest angular delta along longitude (handles meridian crossing at +/-180 deg)
-      let dLonDeg = lon2 - lon1;
-      while (dLonDeg > 180) dLonDeg -= 360;
-      while (dLonDeg < -180) dLonDeg += 360;
-
-      const dLat = ((lat2 - lat1) * Math.PI) / 180;
-      const dLon = (dLonDeg * Math.PI) / 180;
-      const dist = Math.sqrt(dLat * dLat + dLon * dLon);
-      const maxAltitude = Math.min(80, Math.max(15, dist * 25));
-
-      const segments = 24;
-      const pts: { x: number; y: number; visible: boolean }[] = [];
-
-      for (let i = 0; i <= segments; i++) {
-        const t = i / segments;
-        const lat = lat1 + (lat2 - lat1) * t;
-        let lon = lon1 + dLonDeg * t;
-        if (lon > 180) lon -= 360;
-        if (lon < -180) lon += 360;
-        const alt = Math.sin(t * Math.PI) * maxAltitude;
-        pts.push(project(lat, lon, alt));
-      }
-
-      // Draw Arc Line
-      ctx.beginPath();
-      let drawing = false;
-      for (const pt of pts) {
-        if (pt.visible) {
-          if (!drawing) {
-            ctx.moveTo(pt.x, pt.y);
-            drawing = true;
-          } else {
-            ctx.lineTo(pt.x, pt.y);
-          }
-        } else {
-          drawing = false;
-        }
-      }
-
-      if (isSelected) {
-        ctx.strokeStyle = "#38bdf8"; // sky-400
-        ctx.lineWidth = 3;
-        ctx.shadowColor = "#38bdf8";
-        ctx.shadowBlur = 8;
-        ctx.stroke();
-        ctx.shadowBlur = 0; // reset
-      } else {
-        ctx.strokeStyle = "rgba(59, 130, 246, 0.65)"; // blue-500
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-      }
-
-      // Direction Arrow at 65% of arc
-      const arrowIdx = Math.floor(segments * 0.65);
-      const arrowPt = pts[arrowIdx];
-      const nextPt = pts[arrowIdx + 1];
-      if (arrowPt?.visible && nextPt?.visible) {
-        const angle = Math.atan2(nextPt.y - arrowPt.y, nextPt.x - arrowPt.x);
-        ctx.save();
-        ctx.translate(arrowPt.x, arrowPt.y);
-        ctx.rotate(angle);
-        ctx.fillStyle = isSelected ? "#38bdf8" : "#60a5fa";
-        ctx.beginPath();
-        ctx.moveTo(6, 0);
-        ctx.lineTo(-4, -4);
-        ctx.lineTo(-4, 4);
-        ctx.closePath();
-        ctx.fill();
-        ctx.restore();
-      }
-    }
-
-    // 5. Endpoint Pins & Markers
-    // Render pins ONLY for endpoints present in active relations
-    const activeEndpointIds = new Set<string>();
-    for (const rel of relations) {
-      activeEndpointIds.add(rel.source_endpoint_id);
-      activeEndpointIds.add(rel.target_endpoint_id);
-    }
-
-    const visibleEndpoints = Array.from(endpointsById.values()).filter(
-      (ep) => activeEndpointIds.has(ep.id) && ep.location
+  // Push telemetry updates into the engine whenever data/state changes
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine || !isReady) return;
+    engine.updateTelemetry(
+      endpointsById,
+      relations,
+      selectedRelationId,
+      colorMode,
+      Array.from(findingSeveritiesById.entries()).map(([id, severity]) => ({
+        id,
+        severity,
+      }))
     );
+  }, [endpointsById, relations, selectedRelationId, colorMode, findingSeveritiesById, isReady]);
 
-    for (const ep of visibleEndpoints) {
-      if (!ep.location) continue;
+  // Sync visual preset
+  useEffect(() => {
+    engineRef.current?.setVisualPreset(visualPreset);
+  }, [visualPreset]);
 
-      const pt = project(ep.location.latitude, ep.location.longitude);
-      if (!pt.visible) continue;
+  // Sync border visibility
+  useEffect(() => {
+    engineRef.current?.setBordersVisible(showBorders);
+  }, [showBorders]);
 
-      const isSource = ep.role === "source";
+  // Sync auto-orbit
+  useEffect(() => {
+    engineRef.current?.setAutoOrbit(autoOrbit);
+  }, [autoOrbit]);
 
-      if (isSource) {
-        // Source: Triangle (Blue)
-        ctx.fillStyle = "#3b82f6"; // blue-500
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(pt.x, pt.y - 7);
-        ctx.lineTo(pt.x - 6, pt.y + 5);
-        ctx.lineTo(pt.x + 6, pt.y + 5);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
+  // Fly to the selected relation's target
+  useEffect(() => {
+    if (!selectedRelationId) return;
+    const rel = relations.find((r) => r.id === selectedRelationId);
+    if (!rel) return;
+    const tgt = endpointsById.get(rel.target_endpoint_id);
+    if (!tgt?.location) return;
+    engineRef.current?.flyTo(tgt.location.latitude, tgt.location.longitude);
+  }, [selectedRelationId, relations, endpointsById]);
 
-        // Label
-        ctx.font = "10px monospace";
-        ctx.fillStyle = "#93c5fd";
-        ctx.fillText("Source", pt.x + 8, pt.y + 3);
-      } else {
-        // Target: Circle with center dot (Emerald/Lime)
-        ctx.fillStyle = "#10b981"; // emerald-500
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2);
-        ctx.fill();
+  // Keyboard navigation (WCAG 2.2 AA)
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    const step = 0.12;
 
-        ctx.fillStyle = "#ffffff";
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, 2, 0, Math.PI * 2);
-        ctx.fill();
-
-        // Label
-        ctx.font = "10px monospace";
-        ctx.fillStyle = "#a7f3d0";
-        const label = ep.ip || ep.display_name;
-        ctx.fillText(label, pt.x + 8, pt.y + 3);
+    switch (e.key) {
+      case "ArrowLeft":
+        e.preventDefault();
+        engine.setRotationTargetDelta(-step, 0);
+        break;
+      case "ArrowRight":
+        e.preventDefault();
+        engine.setRotationTargetDelta(step, 0);
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        engine.setRotationTargetDelta(0, -step);
+        break;
+      case "ArrowDown":
+        e.preventDefault();
+        engine.setRotationTargetDelta(0, step);
+        break;
+      case "+":
+      case "=":
+        e.preventDefault();
+        engine.setZoom(engine.getZoom() + 0.15);
+        setZoomDisplay(engine.getZoom());
+        break;
+      case "-":
+      case "_":
+        e.preventDefault();
+        engine.setZoom(engine.getZoom() - 0.15);
+        setZoomDisplay(engine.getZoom());
+        break;
+      case "[":
+      case "]": {
+        if (relations.length === 0) break;
+        e.preventDefault();
+        const currentIndex = relations.findIndex((r) => r.id === selectedRelationId);
+        const nextIndex =
+          e.key === "]"
+            ? (currentIndex + 1) % relations.length
+            : (currentIndex - 1 + relations.length) % relations.length;
+        onSelectRelation(relations[nextIndex].id);
+        break;
       }
-    }
-  }, [
-    rotX,
-    rotY,
-    zoom,
-    dimensions,
-    endpointsById,
-    relations,
-    selectedRelationId,
-    onCanvasError,
-    onWebglError,
-  ]);
-
-  // Pointer drag controls for smooth 3D rotation
-  const handleMouseDown = (e: React.MouseEvent) => {
-    isDraggingRef.current = true;
-    dragDistanceRef.current = 0;
-    lastMousePos.current = { x: e.clientX, y: e.clientY };
-  };
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isDraggingRef.current) return;
-    const dx = e.clientX - lastMousePos.current.x;
-    const dy = e.clientY - lastMousePos.current.y;
-    dragDistanceRef.current += Math.hypot(dx, dy);
-    lastMousePos.current = { x: e.clientX, y: e.clientY };
-
-    const sensitivity = 0.005;
-    setRotY((prev) => prev + dx * sensitivity);
-    setRotX((prev) => Math.max(-1.4, Math.min(1.4, prev + dy * sensitivity)));
-  };
-
-  const handleMouseUp = () => {
-    isDraggingRef.current = false;
-  };
-
-  // Touch drag for mobile
-  const handleTouchStart = (e: React.TouchEvent) => {
-    if (e.touches.length === 1) {
-      isDraggingRef.current = true;
-      dragDistanceRef.current = 0;
-      lastMousePos.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      case "b":
+      case "B":
+        e.preventDefault();
+        setShowBorders((v) => !v);
+        break;
+      default:
+        break;
     }
   };
 
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (!isDraggingRef.current || e.touches.length !== 1) return;
-    const dx = e.touches[0].clientX - lastMousePos.current.x;
-    const dy = e.touches[0].clientY - lastMousePos.current.y;
-    dragDistanceRef.current += Math.hypot(dx, dy);
-    lastMousePos.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  const hoveredRelation = useMemo(
+    () => relations.find((r) => r.id === hoveredRelationId) || null,
+    [relations, hoveredRelationId]
+  );
+  const hoveredTarget = hoveredRelation
+    ? endpointsById.get(hoveredRelation.target_endpoint_id)
+    : null;
 
-    const sensitivity = 0.005;
-    setRotY((prev) => prev + dx * sensitivity);
-    setRotX((prev) => Math.max(-1.4, Math.min(1.4, prev + dy * sensitivity)));
+  const handleZoom = (delta: number) => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.setZoom(engine.getZoom() + delta);
+    setZoomDisplay(engine.getZoom());
   };
-
-  // Click / Hit detection to select relationship (only when not dragged)
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (dragDistanceRef.current > 5) return; // Ignore drag release
-
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const clickY = e.clientY - rect.top;
-
-    const width = rect.width;
-    const height = rect.height;
-    const cx = width / 2;
-    const cy = height / 2;
-    const radius = Math.min(width, height) * 0.38 * zoom;
-
-    // Filter to active endpoints with location
-    const activeEndpointIds = new Set<string>();
-    for (const rel of relations) {
-      activeEndpointIds.add(rel.source_endpoint_id);
-      activeEndpointIds.add(rel.target_endpoint_id);
-    }
-
-    const candidateEndpoints = Array.from(endpointsById.values()).filter(
-      (ep) => activeEndpointIds.has(ep.id) && ep.location
-    );
-
-    // Check click against target endpoint nodes
-    for (const ep of candidateEndpoints) {
-      if (!ep.location) continue;
-      const phi = (ep.location.latitude * Math.PI) / 180;
-      const lambda = (ep.location.longitude * Math.PI) / 180;
-      const x0 = radius * Math.cos(phi) * Math.sin(lambda);
-      const y0 = -radius * Math.sin(phi);
-      const z0 = radius * Math.cos(phi) * Math.cos(lambda);
-
-      const cosY = Math.cos(rotY);
-      const sinY = Math.sin(rotY);
-      const x1 = x0 * cosY + z0 * sinY;
-      const z1 = -x0 * sinY + z0 * cosY;
-
-      const cosX = Math.cos(rotX);
-      const sinX = Math.sin(rotX);
-      const y2 = y0 * cosX - z1 * sinX;
-      const z2 = y0 * sinX + z1 * cosX;
-
-      if (z2 > 0) {
-        const sx = cx + x1;
-        const sy = cy + y2;
-        const dist = Math.hypot(clickX - sx, clickY - sy);
-        if (dist <= 18) {
-          // Find relation corresponding to this endpoint
-          const matchedRel = relations.find(
-            (r) => r.target_endpoint_id === ep.id || r.source_endpoint_id === ep.id
-          );
-          if (matchedRel) {
-            onSelectRelation(matchedRel.id);
-            return;
-          }
-        }
-      }
-    }
-  };
-
-  const handleResetCamera = () => {
-    setRotX(0.2);
-    setRotY(-1.5);
-    setZoom(1.0);
-  };
-
-  const selectedRel = relations.find((r) => r.id === selectedRelationId);
-  const selectedTgt = selectedRel ? endpointsById.get(selectedRel.target_endpoint_id) : null;
-  const hasSelectedLocation = Boolean(selectedTgt?.location);
 
   return (
     <div
       ref={containerRef}
-      className="relative w-full h-[420px] bg-zinc-950 rounded-lg overflow-hidden border border-white/5 select-none"
+      tabIndex={0}
+      role="application"
+      aria-label="Kanvas interaktif Globe 3D WebGL pemindaian web. Gunakan tombol panah untuk memutar globe, plus atau minus untuk zoom, kurung siku untuk berpindah relasi, dan tombol B untuk menampilkan atau menyembunyikan batas negara."
+      onKeyDown={handleKeyDown}
+      className="relative w-full h-[460px] bg-zinc-950 rounded-lg overflow-hidden border border-white/10 select-none focus:outline-none focus:ring-1 focus:ring-[var(--color-signal)]"
     >
-      <canvas
-        ref={canvasRef}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleMouseUp}
-        onClick={handleCanvasClick}
-        className="w-full h-full cursor-grab active:cursor-grabbing"
-      />
+      <canvas ref={canvasRef} className="w-full h-full block" aria-hidden="true" />
 
-      {/* Camera Controls Overlay */}
-      <div className="absolute bottom-3 right-3 flex items-center gap-1.5 bg-zinc-900/80 backdrop-blur border border-white/10 rounded-lg p-1 text-zinc-300">
+      {/* Loading / error overlays */}
+      {!isReady && !loadError && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-[11px] font-mono text-zinc-400 pointer-events-none">
+          <ArrowsClockwise size={20} className="animate-spin text-sky-400" />
+          <span>Menjahit geometri Natural Earth…</span>
+        </div>
+      )}
+      {loadError && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center text-[11px] font-mono text-red-300">
+          <span>{loadError}</span>
+          <span className="text-zinc-500">
+            Aset lokal: public/geo/ne_{GEO_RESOLUTION}_land.geojson
+          </span>
+        </div>
+      )}
+
+      {/* Top-Left: Color Mode Switcher + Dynamic Legend + Presets */}
+      <div className="absolute top-3 left-3 flex flex-col gap-2 max-w-[290px]">
+        <div className="bg-zinc-900/90 backdrop-blur border border-white/10 rounded-lg p-1 flex items-center gap-1 text-[11px] font-mono">
+          <button
+            type="button"
+            onClick={() => setColorMode("severity")}
+            aria-pressed={colorMode === "severity"}
+            className={`px-2 py-1 rounded flex items-center gap-1 transition ${
+              colorMode === "severity"
+                ? "bg-[var(--color-signal)] text-zinc-950 font-bold"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            <ShieldWarning size={12} />
+            <span>Risiko</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setColorMode("http_status")}
+            aria-pressed={colorMode === "http_status"}
+            className={`px-2 py-1 rounded flex items-center gap-1 transition ${
+              colorMode === "http_status"
+                ? "bg-[var(--color-signal)] text-zinc-950 font-bold"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            <Stack size={12} />
+            <span>HTTP</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setColorMode("latency")}
+            aria-pressed={colorMode === "latency"}
+            className={`px-2 py-1 rounded flex items-center gap-1 transition ${
+              colorMode === "latency"
+                ? "bg-[var(--color-signal)] text-zinc-950 font-bold"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            <Pulse size={12} />
+            <span>Latensi</span>
+          </button>
+        </div>
+
+        {/* Visual surface preset switcher */}
+        <div className="bg-zinc-900/90 backdrop-blur border border-white/10 rounded-lg p-1 flex items-center gap-1 text-[10px] font-mono">
+          <Cube size={11} className="text-zinc-500 ml-1" />
+          {PRESETS.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => setVisualPreset(p.id)}
+              aria-pressed={visualPreset === p.id}
+              className={`px-1.5 py-1 rounded transition ${
+                visualPreset === p.id
+                  ? "bg-white/15 text-zinc-100 font-bold"
+                  : "text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setShowBorders((v) => !v)}
+            aria-pressed={showBorders}
+            title="Tampilkan / sembunyikan batas negara (B)"
+            className={`px-1.5 py-1 rounded transition flex items-center gap-1 ${
+              showBorders ? "bg-white/10 text-zinc-200" : "text-zinc-600 hover:text-zinc-400"
+            }`}
+          >
+            <MapTrifold size={11} />
+            <span>Batas</span>
+          </button>
+        </div>
+
+        <div className="bg-zinc-900/85 backdrop-blur border border-white/10 rounded-lg p-2.5 text-[10px] text-zinc-300 space-y-1.5 pointer-events-none font-mono">
+          {colorMode === "severity" && (
+            <>
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-rose-500 inline-block" />
+                <span>Critical / High Finding</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block" />
+                <span>Medium Finding</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block" />
+                <span>Bersih / Info Only</span>
+              </div>
+            </>
+          )}
+          {colorMode === "http_status" && (
+            <>
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#a8d94f] inline-block" />
+                <span>2xx Sukses</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block" />
+                <span>4xx Client / WAF Block</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block" />
+                <span>5xx Server Error</span>
+              </div>
+            </>
+          )}
+          {colorMode === "latency" && (
+            <>
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block" />
+                <span>&lt; 150 ms (Cepat)</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block" />
+                <span>150–600 ms (Sedang)</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-rose-500 inline-block" />
+                <span>&gt; 600 ms (Lambat / Delay)</span>
+              </div>
+            </>
+          )}
+          {geometryStats && (
+            <div className="border-t border-white/10 pt-1.5 text-[9px] text-zinc-500 leading-relaxed">
+              Natural Earth {GEO_RESOLUTION} · {geometryStats.polygons} poligon ·{" "}
+              {geometryStats.holes} lubang · {geometryStats.landTriangles.toLocaleString("id-ID")}{" "}
+              segitiga · {mappedTargetCount} target terpetakan
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Top-Right: Region Jump Buttons */}
+      <div className="absolute top-3 right-3 flex flex-col gap-1.5 items-end">
+        <div className="bg-zinc-900/90 backdrop-blur border border-white/10 rounded-lg p-1 flex items-center gap-1 text-[10px] font-mono">
+          <GlobeHemisphereWest size={11} className="text-zinc-500 ml-1" />
+          {REGION_JUMPS.map((r) => (
+            <button
+              key={r.id}
+              type="button"
+              onClick={() => engineRef.current?.jumpToRegion(r.id)}
+              className="px-1.5 py-1 rounded text-zinc-400 hover:text-zinc-100 hover:bg-white/10 transition"
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Bottom-Left: Unlocated / RFC 1918 honest dock */}
+      {unlocatedRelations.length > 0 && (
+        <div className="absolute bottom-3 left-3 max-w-[260px] bg-zinc-900/90 backdrop-blur border border-white/10 rounded-lg p-2.5 space-y-1.5 text-[11px]">
+          <div className="flex items-center gap-1.5 text-zinc-300 font-semibold font-mono">
+            <HardDrives size={13} className="text-amber-400 shrink-0" />
+            <span>Target Lokal / Non-GeoIP ({unlocatedRelations.length})</span>
+          </div>
+          <div className="max-h-24 overflow-y-auto space-y-1 pr-1">
+            {unlocatedRelations.map((rel) => {
+              const tgt = endpointsById.get(rel.target_endpoint_id);
+              const isSel = rel.id === selectedRelationId;
+              return (
+                <button
+                  key={rel.id}
+                  type="button"
+                  onClick={() => onSelectRelation(isSel ? null : rel.id)}
+                  className={`w-full text-left px-2 py-1 rounded font-mono text-[10px] flex items-center justify-between gap-2 border transition ${
+                    isSel
+                      ? "bg-blue-500/20 border-blue-400 text-white"
+                      : "bg-zinc-950/80 border-white/5 text-zinc-300 hover:bg-zinc-800"
+                  }`}
+                >
+                  <span className="truncate">{tgt?.ip || tgt?.display_name || "Target"}</span>
+                  <span className="text-[9px] text-amber-400 shrink-0">
+                    {tgt?.location_status === "unsupported" ? "RFC1918" : "Unmapped"}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-[9px] text-zinc-500 leading-snug">
+            Koordinat tidak dipalsukan — target internal ditampilkan di sini.
+          </p>
+        </div>
+      )}
+
+      {/* Floating HUD tooltip (3D raycast hover) */}
+      {hoveredRelation && hoveredTarget && tooltipPos && (
+        <div
+          style={{
+            left: Math.min((dimensions.width || 600) - 240, Math.max(12, tooltipPos.x + 14)),
+            top: Math.max(12, tooltipPos.y - 10),
+          }}
+          className="absolute z-20 w-60 pointer-events-none bg-zinc-950/95 backdrop-blur border border-white/15 rounded-lg p-3 shadow-2xl space-y-1.5 text-[11px] font-mono"
+        >
+          <div className="flex items-center justify-between border-b border-white/10 pb-1">
+            <span className="font-bold text-zinc-100 truncate">
+              {hoveredTarget.ip || hoveredTarget.display_name}
+            </span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-zinc-300">
+              {hoveredRelation.record_count} req
+            </span>
+          </div>
+          <div className="text-zinc-400 text-[10px] space-y-0.5">
+            <div>
+              Lokasi:{" "}
+              <span className="text-zinc-200">
+                {hoveredTarget.location
+                  ? [hoveredTarget.location.city, hoveredTarget.location.region, hoveredTarget.location.country]
+                      .filter(Boolean)
+                      .join(", ") || "Region-level (tanpa kota)"
+                  : "Tidak diketahui"}
+              </span>
+            </div>
+            {hoveredTarget.location_level === "region" && (
+              <div className="text-amber-400/90">
+                Provenance: region-level estimate (tanpa kota sintetis)
+              </div>
+            )}
+            {hoveredTarget.provider_info && (
+              <div className="truncate">
+                Provider: <span className="text-zinc-300">{hoveredTarget.provider_info}</span>
+              </div>
+            )}
+            <div>
+              Status HTTP:{" "}
+              <span className="text-emerald-400">
+                {hoveredRelation.status_codes.join(", ") || "N/A"}
+              </span>
+            </div>
+            {hoveredRelation.avg_latency_ms != null && (
+              <div>
+                Rata-rata RTT:{" "}
+                <span className="text-sky-400">{hoveredRelation.avg_latency_ms} ms</span>
+              </div>
+            )}
+            {hoveredRelation.total_bytes ? (
+              <div>
+                Volume:{" "}
+                <span className="text-zinc-300">
+                  {(hoveredRelation.total_bytes / 1024).toFixed(1)} KB
+                </span>
+              </div>
+            ) : null}
+            {hoveredRelation.module_ids && hoveredRelation.module_ids.length > 0 && (
+              <div className="truncate">
+                Modul: <span className="text-zinc-300">{hoveredRelation.module_ids.join(", ")}</span>
+              </div>
+            )}
+            {hoveredRelation.linked_finding_ids.length > 0 && (
+              <div className="text-amber-400 font-semibold pt-0.5">
+                ⚠ {hoveredRelation.linked_finding_ids.length} Temuan Keamanan Tertaut
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Bottom-Right: Camera Controls */}
+      <div className="absolute bottom-3 right-3 flex items-center gap-1.5 bg-zinc-900/85 backdrop-blur border border-white/10 rounded-lg p-1 text-zinc-300">
         <button
-          onClick={() => setZoom((z) => Math.min(2.0, z + 0.15))}
-          title="Zoom In"
+          type="button"
+          onClick={() => setAutoOrbit((o) => !o)}
+          title={autoOrbit ? "Hentikan Rotasi Otomatis" : "Putar Otomatis (Orbit)"}
+          aria-label="Toggle Auto Orbit"
+          aria-pressed={autoOrbit}
+          className={`p-1.5 rounded transition ${
+            autoOrbit ? "bg-[var(--color-signal)] text-zinc-950" : "hover:bg-white/10"
+          }`}
+        >
+          {autoOrbit ? <Pause size={15} weight="fill" /> : <Play size={15} weight="fill" />}
+        </button>
+        <button
+          type="button"
+          onClick={() => handleZoom(0.18)}
+          title="Perbesar (Zoom In)"
           aria-label="Zoom In"
-          className="p-1.5 hover:bg-white/10 rounded transition focus:outline-none focus:ring-1 focus:ring-blue-500"
+          className="p-1.5 hover:bg-white/10 rounded transition"
         >
           <MagnifyingGlassPlus size={16} />
         </button>
+        <span className="text-[9px] font-mono text-zinc-500 w-8 text-center tabular-nums">
+          {zoomDisplay.toFixed(2)}×
+        </span>
         <button
-          onClick={() => setZoom((z) => Math.max(0.6, z - 0.15))}
-          title="Zoom Out"
+          type="button"
+          onClick={() => handleZoom(-0.18)}
+          title="Perkecil (Zoom Out)"
           aria-label="Zoom Out"
-          className="p-1.5 hover:bg-white/10 rounded transition focus:outline-none focus:ring-1 focus:ring-blue-500"
+          className="p-1.5 hover:bg-white/10 rounded transition"
         >
           <MagnifyingGlassMinus size={16} />
         </button>
         {selectedRelationId && (
           <button
-            onClick={() => focusRelation(selectedRelationId)}
-            disabled={!hasSelectedLocation}
-            title={
-              hasSelectedLocation
-                ? "Fokus Relasi Terpilih"
-                : "Lokasi target tidak tersedia untuk fokus kamera"
-            }
-            aria-label="Fokus Relasi Terpilih"
-            className={`p-1.5 rounded transition focus:outline-none focus:ring-1 focus:ring-blue-500 ${
-              hasSelectedLocation
-                ? "hover:bg-white/10 text-blue-400 cursor-pointer"
-                : "text-zinc-600 cursor-not-allowed"
-            }`}
+            type="button"
+            onClick={() => {
+              const rel = relations.find((r) => r.id === selectedRelationId);
+              const tgt = rel ? endpointsById.get(rel.target_endpoint_id) : null;
+              if (tgt?.location) {
+                engineRef.current?.flyTo(tgt.location.latitude, tgt.location.longitude);
+              }
+            }}
+            title="Fokus ke Target Terpilih"
+            aria-label="Fokus ke Target Terpilih"
+            className="p-1.5 hover:bg-white/10 text-sky-400 rounded transition"
           >
             <Crosshair size={16} />
           </button>
         )}
         <button
-          onClick={handleResetCamera}
-          title="Reset Orientasi Kamera"
+          type="button"
+          onClick={() => {
+            engineRef.current?.resetCamera();
+            setZoomDisplay(1.05);
+          }}
+          title="Reset Kamera"
           aria-label="Reset Orientasi Kamera"
-          className="p-1.5 hover:bg-white/10 rounded transition focus:outline-none focus:ring-1 focus:ring-blue-500"
+          className="p-1.5 hover:bg-white/10 rounded transition"
         >
           <ArrowsClockwise size={16} />
         </button>
       </div>
 
-      {/* Floating Visual Legend */}
-      <div className="absolute top-3 left-3 bg-zinc-900/80 backdrop-blur border border-white/10 rounded-lg p-2.5 text-[11px] text-zinc-400 space-y-1.5 pointer-events-none">
-        <div className="flex items-center gap-2">
-          <span className="w-2.5 h-2.5 inline-block border-b-2 border-r-2 border-blue-500 rotate-45" />
-          <span className="text-zinc-200">Sumber (Executor)</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block" />
-          <span className="text-zinc-200">Target (IP Tujuan)</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="w-4 h-0.5 bg-blue-500 inline-block" />
-          <span>Hubungan Visual (Bukan Rute Paket)</span>
-        </div>
+      {/* Bottom-Center: spherical shell legend (technical honesty) */}
+      <div className="absolute bottom-3 left-1/2 -translate-x-1/2 text-[9px] font-mono text-zinc-600 pointer-events-none whitespace-nowrap">
+        R<sub>globe</sub>={R_GLOBE} · R<sub>land</sub>={R_LAND} · WebGL
       </div>
     </div>
   );

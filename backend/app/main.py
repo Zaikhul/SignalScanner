@@ -44,14 +44,17 @@ app = FastAPI(
 )
 
 # CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["X-Checksum-SHA256", "Content-Disposition"],
-)
+cors_kwargs = {
+    "allow_origins": settings.ALLOWED_ORIGINS,
+    "allow_credentials": True,
+    "allow_methods": ["*"],
+    "allow_headers": ["*"],
+    "expose_headers": ["X-Checksum-SHA256", "Content-Disposition"],
+}
+if settings.ENVIRONMENT != "production":
+    cors_kwargs["allow_origin_regex"] = r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$"
+
+app.add_middleware(CORSMiddleware, **cors_kwargs)
 
 # Include v1 REST routers
 app.include_router(collectors.router, prefix=settings.API_V1_STR)
@@ -78,3 +81,26 @@ async def health_check():
         "service": settings.PROJECT_NAME,
         "version": settings.VERSION,
     }
+
+
+@app.get("/readyz", tags=["health"])
+async def readiness_check():
+    """Readiness endpoint validating database connectivity and migration state (F05)."""
+    from sqlalchemy import text
+    from app.db.session import AsyncSessionLocal, engine
+    
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(text("SELECT 1"))
+        return {
+            "status": "ready",
+            "service": settings.PROJECT_NAME,
+            "version": settings.VERSION,
+            "database": "connected",
+            "dialect": engine.dialect.name,
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"DATABASE_UNAVAILABLE: {str(e)}",
+        )

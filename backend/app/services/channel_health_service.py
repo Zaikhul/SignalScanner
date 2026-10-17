@@ -373,6 +373,9 @@ class ChannelHealthService:
         )
         m_after = q_after.scalars().all()
 
+        from collections import defaultdict
+        from statistics import mean
+
         # Helper to summarize metrics from sample list
         def summarize_samples(samples: List[MeasurementModel]) -> Dict[str, Any]:
             if not samples:
@@ -390,7 +393,23 @@ class ChannelHealthService:
         b_metrics = summarize_samples(m_before)
         a_metrics = summarize_samples(m_after)
 
-        has_sufficient_data = bool(m_before and m_after)
+        # F08: Group samples by target_id for fair before/after comparison
+        targets_before = defaultdict(list)
+        for s in m_before:
+            targets_before[s.target_id].append(s.signal_value)
+
+        targets_after = defaultdict(list)
+        for s in m_after:
+            targets_after[s.target_id].append(s.signal_value)
+
+        matched_targets = set(targets_before.keys()) & set(targets_after.keys())
+        # Enforce minimum sample threshold (>= 3 samples per AP on both windows)
+        valid_matched = [
+            t for t in matched_targets
+            if len(targets_before[t]) >= 3 and len(targets_after[t]) >= 3
+        ]
+
+        has_sufficient_data = bool(valid_matched)
 
         if not has_sufficient_data:
             deltas: Dict[str, MetricDelta] = {
@@ -407,32 +426,46 @@ class ChannelHealthService:
                     improved=None,
                 ),
             }
-            summary = "Data tidak mencukupi (insufficient_data): Tidak ada sampel teramati pada window pengamatan sebelum atau sesudah."
+            if not m_before or not m_after:
+                summary = "Data tidak mencukupi (insufficient_data): Tidak ada sampel teramati pada window pengamatan sebelum atau sesudah."
+            elif not matched_targets:
+                summary = "Data tidak mencukupi (insufficient_data): Tidak ada target AP setara yang teramati pada kedua window perbandingan."
+            else:
+                summary = f"Data tidak mencukupi (insufficient_data): Sampel AP setara kurang dari ambang batas minimum (memerlukan minimal 3 sampel teramati per AP sebelum & sesudah, teramati max {max(min(len(targets_before[t]), len(targets_after[t])) for t in matched_targets)} sampel)."
         else:
-            delta_rssi = round(a_metrics["mean_rssi"] - b_metrics["mean_rssi"], 1)
-            delta_std = round(a_metrics["rssi_std"] - b_metrics["rssi_std"], 2)
+            # Calculate per-AP deltas for matched targets to avoid composition skew
+            target_deltas = [mean(targets_after[t]) - mean(targets_before[t]) for t in valid_matched]
+            delta_rssi = round(sum(target_deltas) / len(target_deltas), 1)
+
+            matched_b_vals = [v for t in valid_matched for v in targets_before[t]]
+            matched_a_vals = [v for t in valid_matched for v in targets_after[t]]
+            b_mean = sum(matched_b_vals) / len(matched_b_vals)
+            a_mean = sum(matched_a_vals) / len(matched_a_vals)
+            b_std = (sum((v - b_mean) ** 2 for v in matched_b_vals) / len(matched_b_vals)) ** 0.5
+            a_std = (sum((v - a_mean) ** 2 for v in matched_a_vals) / len(matched_a_vals)) ** 0.5
+            delta_std = round(a_std - b_std, 2)
 
             deltas = {
                 "mean_signal_rssi": MetricDelta(
-                    before=b_metrics["mean_rssi"],
-                    after=a_metrics["mean_rssi"],
+                    before=round(b_mean, 1),
+                    after=round(a_mean, 1),
                     delta=delta_rssi,
                     improved=delta_rssi > 0,
                 ),
                 "signal_temporal_instability": MetricDelta(
-                    before=b_metrics["rssi_std"],
-                    after=a_metrics["rssi_std"],
+                    before=round(b_std, 2),
+                    after=round(a_std, 2),
                     delta=delta_std,
                     improved=delta_std < 0,
                 ),
             }
 
-            # Formulate non-causal observation statement
+            # Formulate non-causal observation statement with matched target count
             observations: List[str] = []
             if delta_rssi > 0:
-                observations.append(f"Kekuatan sinyal teramati meningkat {delta_rssi} dB")
+                observations.append(f"Kekuatan sinyal pada {len(valid_matched)} AP setara teramati meningkat {delta_rssi} dB")
             elif delta_rssi < 0:
-                observations.append(f"Kekuatan sinyal teramati menurun {abs(delta_rssi)} dB")
+                observations.append(f"Kekuatan sinyal pada {len(valid_matched)} AP setara teramati menurun {abs(delta_rssi)} dB")
 
             if delta_std < 0:
                 observations.append("Variansi temporal teramati lebih stabil")
@@ -442,7 +475,7 @@ class ChannelHealthService:
             summary = (
                 "Perubahan teramati: " + ", ".join(observations)
                 if observations
-                else "Tidak ada perubahan signifikan teramati pada window perbandingan"
+                else f"Tidak ada perubahan signifikan teramati pada {len(valid_matched)} AP setara"
             )
 
         val_id = f"chv_{uuid.uuid4().hex[:12]}"

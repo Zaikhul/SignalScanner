@@ -292,6 +292,35 @@ class ScanFinding(BaseModel):
     first_seen_at: datetime
     last_seen_at: datetime
     assessment_version: str = "web_scan.v1"
+    triage_status: Literal["open", "in_progress", "false_positive", "accepted_risk", "resolved"] = "open"
+    triage_reason: Optional[str] = None
+    triage_actor: Optional[str] = None
+    triaged_at: Optional[datetime] = None
+    triage_version: int = 1
+
+
+class TriageFindingRequest(BaseModel):
+    status: Literal["open", "in_progress", "false_positive", "accepted_risk", "resolved"]
+    reason: str
+    assignee_id: Optional[str] = None
+    expected_version: Optional[int] = None
+
+
+class FindingComparisonItem(BaseModel):
+    fingerprint: str
+    title: str
+    severity: Severity
+    status: Literal["recurring", "new", "resolved", "not_comparable"]
+    baseline_finding_id: Optional[str] = None
+    current_finding_id: Optional[str] = None
+
+
+class CompareScanFindingsResponse(BaseModel):
+    baseline_scan_id: str
+    current_scan_id: str
+    compatible: bool
+    compatibility_reason: Optional[str] = None
+    findings: List[FindingComparisonItem]
 
 
 class ScanObservation(BaseModel):

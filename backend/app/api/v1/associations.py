@@ -14,16 +14,17 @@ from app.schemas.association import (
     LanHostListResponse,
     ScanHostPortsRequest,
 )
-from app.core.security import verify_collector_auth
+from app.core.security import verify_collector_auth, verify_operator_auth
 from app.services.association_service import association_service
 
-router = APIRouter(tags=["associations"], dependencies=[Depends(verify_collector_auth)])
+router = APIRouter(tags=["associations"])
 
 
 @router.post(
     "/sessions/{session_id}/associations",
     response_model=AssociationResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(verify_operator_auth)],
 )
 async def create_association_draft(
     session_id: str,
@@ -34,7 +35,11 @@ async def create_association_draft(
     return await association_service.create_draft(db, session_id, payload)
 
 
-@router.post("/associations/{association_id}/connect", response_model=AssociationResponse)
+@router.post(
+    "/associations/{association_id}/connect",
+    response_model=AssociationResponse,
+    dependencies=[Depends(verify_operator_auth)],
+)
 async def connect_association(
     association_id: str,
     payload: ConnectAssociationRequest,
@@ -47,7 +52,11 @@ async def connect_association(
     return await association_service.connect(db, association_id, payload)
 
 
-@router.post("/associations/{association_id}/disconnect", response_model=AssociationResponse)
+@router.post(
+    "/associations/{association_id}/disconnect",
+    response_model=AssociationResponse,
+    dependencies=[Depends(verify_operator_auth)],
+)
 async def disconnect_association(
     association_id: str,
     payload: DisconnectAssociationRequest = DisconnectAssociationRequest(),
@@ -59,7 +68,10 @@ async def disconnect_association(
     )
 
 
-@router.post("/associations/{association_id}/inventory/refresh")
+@router.post(
+    "/associations/{association_id}/inventory/refresh",
+    dependencies=[Depends(verify_operator_auth)],
+)
 async def refresh_inventory(
     association_id: str,
     db: AsyncSession = Depends(get_db),
@@ -68,7 +80,11 @@ async def refresh_inventory(
     return await association_service.trigger_refresh(db, association_id)
 
 
-@router.get("/associations/{association_id}", response_model=AssociationResponse)
+@router.get(
+    "/associations/{association_id}",
+    response_model=AssociationResponse,
+    dependencies=[Depends(verify_operator_auth)],
+)
 async def get_association(
     association_id: str,
     db: AsyncSession = Depends(get_db),
@@ -77,7 +93,11 @@ async def get_association(
     return await association_service.get_by_id(db, association_id)
 
 
-@router.get("/associations/{association_id}/hosts", response_model=LanHostListResponse)
+@router.get(
+    "/associations/{association_id}/hosts",
+    response_model=LanHostListResponse,
+    dependencies=[Depends(verify_operator_auth)],
+)
 async def list_association_hosts(
     association_id: str,
     page: int = Query(1, ge=1),
@@ -94,6 +114,7 @@ async def list_association_hosts(
 @router.post(
     "/associations/{association_id}/hosts/{host_ip}/scan-ports",
     response_model=LanHostItem,
+    dependencies=[Depends(verify_operator_auth)],
 )
 async def scan_host_ports(
     association_id: str,
@@ -107,7 +128,10 @@ async def scan_host_ports(
     )
 
 
-@router.post("/associations/{association_id}/exports")
+@router.post(
+    "/associations/{association_id}/exports",
+    dependencies=[Depends(verify_operator_auth)],
+)
 async def export_inventory(
     association_id: str,
     format: str = Query("json", pattern="^(json|csv)$"),
@@ -117,7 +141,11 @@ async def export_inventory(
     return await association_service.export_inventory(db, association_id, format=format)
 
 
-@router.post("/associations/{association_id}/ingest/status", response_model=AssociationResponse)
+@router.post(
+    "/associations/{association_id}/ingest/status",
+    response_model=AssociationResponse,
+    dependencies=[Depends(verify_collector_auth)],
+)
 async def ingest_association_status(
     association_id: str,
     payload: IngestAssociationStatusRequest,
@@ -127,7 +155,10 @@ async def ingest_association_status(
     return await association_service.update_status_from_collector(db, association_id, payload)
 
 
-@router.post("/associations/{association_id}/ingest/hosts")
+@router.post(
+    "/associations/{association_id}/ingest/hosts",
+    dependencies=[Depends(verify_collector_auth)],
+)
 async def ingest_association_hosts(
     association_id: str,
     payload: IngestHostBatchRequest,

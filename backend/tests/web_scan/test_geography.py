@@ -285,3 +285,92 @@ def test_offline_geoip_unmapped_public_ip_returns_unknown():
     assert level == "unknown"
     assert "not found" in reason.lower()
 
+
+
+@pytest.mark.asyncio
+async def test_geography_telemetry_and_severity_enrichment(geo_test_db: AsyncSession):
+    """Verify that latency metrics and finding severity are properly aggregated onto relations and endpoints."""
+    scan_id = str(uuid.uuid4())
+    tenant_id = "test_tenant"
+
+    job = WebScanJobModel(
+        id=scan_id,
+        tenant_id=tenant_id,
+        created_by="test_op",
+        raw_target="https://api.example.com",
+        normalized_target="https://api.example.com",
+        target_display="api.example.com",
+        status="completed",
+        version=1,
+        summary_data={"observations_total": 2},
+    )
+    geo_test_db.add(job)
+
+    obs_id_1 = str(uuid.uuid4())
+    obs_id_2 = str(uuid.uuid4())
+    obs1 = WebScanObservationModel(
+        id=obs_id_1,
+        scan_id=scan_id,
+        module="recon",
+        kind="http_response",
+        data={
+            "url_display": "https://api.example.com/v1",
+            "method": "GET",
+            "status_code": 200,
+            "target_ip": "104.16.1.1",
+            "peer_ip": "104.16.1.1",
+            "elapsed_ms": 120.0,
+            "decompressed_bytes": 1024,
+        },
+    )
+    obs2 = WebScanObservationModel(
+        id=obs_id_2,
+        scan_id=scan_id,
+        module="recon",
+        kind="http_response",
+        data={
+            "url_display": "https://api.example.com/v2",
+            "method": "GET",
+            "status_code": 500,
+            "target_ip": "104.16.1.1",
+            "peer_ip": "104.16.1.1",
+            "elapsed_ms": 280.0,
+            "decompressed_bytes": 2048,
+        },
+    )
+    geo_test_db.add_all([obs1, obs2])
+
+    crit_find_id = str(uuid.uuid4())
+    finding = WebScanFindingModel(
+        id=crit_find_id,
+        scan_id=scan_id,
+        module="recon",
+        check_id="recon.server_error",
+        category="security",
+        severity="critical",
+        severity_reason="Fatal 500 server crash",
+        confidence="confirmed_configuration",
+        title="Critical Crash",
+        description="Stack trace revealed",
+        remediation="Patch error handler",
+        evidence={"observation_ids": [obs_id_2]},
+        fingerprint="fp_crit_123",
+        occurrence_count=1,
+    )
+    geo_test_db.add(finding)
+    await geo_test_db.commit()
+
+    res = await WebScanGeographyService.get_scan_geography(geo_test_db, tenant_id, scan_id)
+    assert res is not None
+    assert len(res.relations) == 1
+    rel = res.relations[0]
+    assert rel.avg_latency_ms == 200.0
+    assert rel.max_latency_ms == 280.0
+    assert rel.total_bytes == 3072
+    assert rel.highest_severity == "critical"
+    assert rel.finding_counts == {"critical": 1}
+
+    tgt_ep = next(ep for ep in res.endpoints if ep.role == "target")
+    assert tgt_ep.highest_severity == "critical"
+    assert tgt_ep.finding_count == 1
+    assert "api.example.com" in tgt_ep.hostnames

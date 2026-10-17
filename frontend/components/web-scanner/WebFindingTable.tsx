@@ -49,6 +49,14 @@ export function WebFindingTable() {
     info: "bg-zinc-800 text-zinc-300 border-zinc-700",
   };
 
+  const triageBadges: Record<string, string> = {
+    open: "bg-zinc-800 text-zinc-300 border-zinc-700",
+    in_progress: "bg-blue-950/60 text-blue-400 border-blue-500/30",
+    resolved: "bg-emerald-950/60 text-emerald-400 border-emerald-500/30",
+    false_positive: "bg-purple-950/60 text-purple-400 border-purple-500/30",
+    accepted_risk: "bg-amber-950/60 text-amber-400 border-amber-500/30",
+  };
+
   return (
     <div
       role="region"
@@ -120,6 +128,7 @@ export function WebFindingTable() {
               <th scope="col" className="py-3 px-4">Severity</th>
               <th scope="col" className="py-3 px-4">Check ID</th>
               <th scope="col" className="py-3 px-4">Judul Temuan</th>
+              <th scope="col" className="py-3 px-4">Triase</th>
               <th scope="col" className="py-3 px-4">Confidence</th>
               <th scope="col" className="py-3 px-4">Jumlah</th>
               <th scope="col" className="py-3 px-4 text-right">Aksi</th>
@@ -128,7 +137,7 @@ export function WebFindingTable() {
           <tbody className="divide-y divide-white/5">
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={6} className="py-8 text-center text-zinc-500">
+                <td colSpan={7} className="py-8 text-center text-zinc-500">
                   {findings.length === 0
                     ? "Belum ada temuan keamanan yang tercatat pada scan ini."
                     : "Tidak ada temuan keamanan yang sesuai dengan filter atau kata kunci."}
@@ -161,6 +170,15 @@ export function WebFindingTable() {
                   </td>
                   <td className="py-3 px-4 font-mono text-zinc-400">{finding.check_id}</td>
                   <td className="py-3 px-4 font-medium text-zinc-100">{finding.title}</td>
+                  <td className="py-3 px-4">
+                    <span
+                      className={`inline-block px-2 py-0.5 rounded font-mono text-[10px] uppercase font-semibold border ${
+                        triageBadges[finding.triage_status || "open"] || triageBadges.open
+                      }`}
+                    >
+                      {(finding.triage_status || "open").replace("_", " ")}
+                    </span>
+                  </td>
                   <td className="py-3 px-4 capitalize font-mono text-[11px] text-zinc-400">
                     {finding.confidence.replace("_", " ")}
                   </td>

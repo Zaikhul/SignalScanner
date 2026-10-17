@@ -61,8 +61,9 @@ class LanInventoryEngine(LanInventoryAdapter):
     - MAC pseudonymization (HMAC tenant-scoped) & Vendor OUI lookup
     """
 
-    def __init__(self):
+    def __init__(self, enable_port_probe: bool = False):
         self._running = False
+        self.enable_port_probe = enable_port_probe
 
     async def capabilities(self) -> Dict[str, Any]:
         return {
@@ -103,12 +104,12 @@ class LanInventoryEngine(LanInventoryAdapter):
             hosts_map[bound.gateway_ip] = {
                 "ip": bound.gateway_ip,
                 "ip_version": 4,
-                "hostname": "gateway.local",
-                "mac_hash": pseudonymize_id("00:00:00:00:00:01"),
-                "oui_vendor": "Network Gateway",
+                "hostname": None,
+                "mac_hash": None,
+                "oui_vendor": None,
                 "discovery_methods": ["gateway_snapshot"],
-                "reachability": "up",
-                "rtt_ms": 1.0,
+                "reachability": "unknown",
+                "rtt_ms": None,
                 "is_self": False,
                 "is_gateway": True,
                 "quality_flags": ["gateway"],
@@ -190,8 +191,9 @@ class LanInventoryEngine(LanInventoryAdapter):
                     host["hostname"] = hostname
                     host["discovery_methods"].append("mdns")
 
-        # 6. Safe lightweight port audit for common LAN services
-        await self._probe_hosts_ports(hosts_map)
+        # 6. Safe lightweight port audit for common LAN services (only if explicitly enabled)
+        if self.enable_port_probe:
+            await self._probe_hosts_ports(hosts_map)
 
         yield HostBatch(
             association_id="assoc",

@@ -36,10 +36,11 @@ async def init_db() -> None:
         def sync_upgrade_columns(sync_conn):
             from sqlalchemy import inspect, text
             
-            # Enable WAL mode for high concurrency
+            # Enable WAL mode for high concurrency on SQLite
             try:
-                sync_conn.execute(text("PRAGMA journal_mode=WAL;"))
-                sync_conn.execute(text("PRAGMA synchronous=NORMAL;"))
+                if sync_conn.dialect.name == "sqlite":
+                    sync_conn.execute(text("PRAGMA journal_mode=WAL;"))
+                    sync_conn.execute(text("PRAGMA synchronous=NORMAL;"))
             except Exception:
                 pass
                 
@@ -81,6 +82,22 @@ async def init_db() -> None:
                     sync_conn.execute(text("ALTER TABLE collectors ALTER COLUMN last_seen DROP NOT NULL"))
                 except Exception:
                     pass
+
+            if "web_scan_findings" in inspector.get_table_names():
+                existing_findings_cols = {c["name"] for c in inspector.get_columns("web_scan_findings")}
+                findings_cols_to_add = [
+                    ("triage_status", "VARCHAR(32) DEFAULT 'open'"),
+                    ("triage_reason", "TEXT"),
+                    ("triage_actor", "VARCHAR(64)"),
+                    ("triaged_at", "TIMESTAMP"),
+                    ("triage_version", "INTEGER DEFAULT 1"),
+                ]
+                for col_name, col_type in findings_cols_to_add:
+                    if col_name not in existing_findings_cols:
+                        try:
+                            sync_conn.execute(text(f"ALTER TABLE web_scan_findings ADD COLUMN {col_name} {col_type}"))
+                        except Exception:
+                            pass
 
         await conn.run_sync(sync_upgrade_columns)
 

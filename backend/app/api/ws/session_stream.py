@@ -5,7 +5,7 @@ import orjson
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
-from app.core.security import verify_ws_token
+from app.core.security import verify_ws_token, consume_session_ws_ticket
 from app.core.stream_engine import stream_engine
 from app.db.models import ScanSessionModel
 from app.db.session import AsyncSessionLocal
@@ -20,13 +20,20 @@ async def session_websocket_endpoint(
     session_id: str,
     after_sequence: int = Query(0, ge=0),
     token: Optional[str] = Query(None),
+    ticket: Optional[str] = Query(None),
 ):
     """
     Real-time streaming WebSocket endpoint for Live Scan.
     Provides snapshot bootstrap, sequence replay, and low-latency batch broadcasts.
-    Requires valid authentication token.
+    Requires valid single-use ticket or operator authentication token.
     """
-    if not verify_ws_token(token):
+    is_authorized = False
+    if ticket:
+        is_authorized = consume_session_ws_ticket(ticket, session_id)
+    elif token:
+        is_authorized = verify_ws_token(token)
+
+    if not is_authorized:
         await websocket.close(code=4401, reason="Unauthorized")
         return
 

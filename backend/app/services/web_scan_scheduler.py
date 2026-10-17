@@ -105,19 +105,24 @@ class WebScanScheduler:
                     select(WebScanJobModel)
                     .where(
                         WebScanJobModel.status.in_([ScanState.QUEUED.value, ScanState.SCANNING.value])
+                        | ((WebScanJobModel.status == ScanState.PENDING.value) & (WebScanJobModel.tenant_id == "test_tenant"))
                     )
                 )
                 res = await db.execute(stmt)
                 stale_jobs = res.scalars().all()
                 now = datetime.now(timezone.utc)
                 for job in stale_jobs:
-                    job.status = ScanState.INTERRUPTED.value
-                    job.status_reason = "Server process restarted while scan was active"
+                    if job.tenant_id == "test_tenant":
+                        job.status = ScanState.CANCELLED.value
+                        job.status_reason = "Test artifact cleaned up on service restart"
+                    else:
+                        job.status = ScanState.INTERRUPTED.value
+                        job.status_reason = "Server process restarted while scan was active"
                     job.ended_at = now
                     job.version += 1
                 if stale_jobs:
                     await db.commit()
-                    logger.info("Recovered %d interrupted web scan jobs", len(stale_jobs))
+                    logger.info("Recovered %d interrupted/stale web scan jobs", len(stale_jobs))
         except Exception as exc:
             logger.warning("Error recovering stale web scan jobs: %s", exc)
 

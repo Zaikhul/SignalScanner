@@ -29,25 +29,47 @@ def verify_device_signature(payload_bytes: bytes, signature_hex: str, secret: st
     return hmac.compare_digest(expected, signature_hex)
 
 
+import time
+from typing import Dict, Tuple
+
+# Single-use session WebSocket tickets: ticket -> (session_id, expires_at)
+_SESSION_WS_TICKETS: Dict[str, Tuple[str, float]] = {}
+
+
+def issue_session_ws_ticket(session_id: str, ttl_seconds: int = 60) -> str:
+    """Issues a single-use short-lived token for signal session WebSocket stream."""
+    import uuid
+    ticket = f"stk_{uuid.uuid4().hex}"
+    _SESSION_WS_TICKETS[ticket] = (session_id, time.time() + ttl_seconds)
+    return ticket
+
+
+def consume_session_ws_ticket(ticket: Optional[str], session_id: str) -> bool:
+    """Consumes single-use ticket for signal session WebSocket stream."""
+    if not ticket or ticket not in _SESSION_WS_TICKETS:
+        return False
+    bound_session, expires_at = _SESSION_WS_TICKETS.pop(ticket)
+    if time.time() > expires_at:
+        return False
+    return bound_session == session_id
+
+
 async def verify_operator_auth(
     authorization: Optional[str] = Header(None, alias="Authorization"),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-    x_collector_key: Optional[str] = Header(None, alias="X-Collector-Key"),
 ) -> str:
-    """FastAPI dependency to verify operator / UI caller credentials."""
+    """FastAPI dependency to verify operator / UI caller credentials (strictly operator only)."""
     token = None
-    if authorization:
+    if isinstance(authorization, str):
         parts = authorization.split()
         if len(parts) == 2 and parts[0].lower() == "bearer":
             token = parts[1]
         elif len(parts) == 1:
             token = parts[0]
-    elif x_api_key:
+    elif isinstance(x_api_key, str):
         token = x_api_key
-    elif x_collector_key:
-        token = x_collector_key
 
-    valid_keys = [settings.API_AUTH_TOKEN, settings.COLLECTOR_API_KEY]
+    valid_keys = [settings.API_AUTH_TOKEN]
     is_valid = any(hmac.compare_digest(token, key) for key in valid_keys if token)
 
     if not token or not is_valid:
@@ -66,18 +88,18 @@ async def verify_collector_auth(
 ) -> str:
     """FastAPI dependency to verify collector daemon credentials."""
     token = None
-    if authorization:
+    if isinstance(authorization, str):
         parts = authorization.split()
         if len(parts) == 2 and parts[0].lower() == "bearer":
             token = parts[1]
         elif len(parts) == 1:
             token = parts[0]
-    elif x_collector_key:
+    elif isinstance(x_collector_key, str):
         token = x_collector_key
-    elif x_api_key:
+    elif isinstance(x_api_key, str):
         token = x_api_key
 
-    valid_keys = [settings.COLLECTOR_API_KEY, settings.API_AUTH_TOKEN, settings.LOCAL_AGENT_TOKEN]
+    valid_keys = [settings.COLLECTOR_API_KEY, settings.LOCAL_AGENT_TOKEN]
     is_valid = any(hmac.compare_digest(token, key) for key in valid_keys if token)
 
     if not token or not is_valid:
@@ -89,9 +111,39 @@ async def verify_collector_auth(
     return token
 
 
+async def verify_operator_or_collector_auth(
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_collector_key: Optional[str] = Header(None, alias="X-Collector-Key"),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> str:
+    """FastAPI dependency to verify credentials from either operator or collector callers."""
+    token = None
+    if isinstance(authorization, str):
+        parts = authorization.split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            token = parts[1]
+        elif len(parts) == 1:
+            token = parts[0]
+    elif isinstance(x_collector_key, str):
+        token = x_collector_key
+    elif isinstance(x_api_key, str):
+        token = x_api_key
+
+    valid_keys = [settings.API_AUTH_TOKEN, settings.COLLECTOR_API_KEY, settings.LOCAL_AGENT_TOKEN]
+    is_valid = any(hmac.compare_digest(token, key) for key in valid_keys if token)
+
+    if not token or not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="UNAUTHORIZED: Missing or invalid credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return token
+
+
 def verify_ws_token(token: Optional[str]) -> bool:
-    """Validates token passed via query parameter for WebSocket connections."""
+    """Validates token passed via query parameter for WebSocket connections (Operator only)."""
     if not token:
         return False
-    return hmac.compare_digest(token, settings.API_AUTH_TOKEN) or hmac.compare_digest(token, settings.COLLECTOR_API_KEY)
+    return hmac.compare_digest(token, settings.API_AUTH_TOKEN)
 

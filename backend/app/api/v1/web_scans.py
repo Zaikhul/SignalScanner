@@ -21,6 +21,8 @@ from app.schemas.web_scan import (
     ScanObservation,
     ScanSnapshot,
     WebScanEvent,
+    TriageFindingRequest,
+    CompareScanFindingsResponse,
 )
 from app.services.web_scan_export_service import WebScanExportService
 from app.services.web_scan_geography_service import WebScanGeographyService
@@ -215,6 +217,49 @@ async def get_web_scan_findings(
         offset=offset,
     )
     return Page(items=items, total=total)
+
+
+@router.patch(
+    "/{scan_id}/findings/{finding_id}/triage",
+    response_model=ScanFinding,
+    summary="Update triage status and rationale for a scan finding",
+)
+async def triage_finding(
+    scan_id: str,
+    finding_id: str,
+    payload: TriageFindingRequest,
+    principal: OperatorPrincipal = Depends(require_permission("web_scan:read")),
+    db: AsyncSession = Depends(get_db),
+):
+    _check_enabled()
+    return await WebScanService.triage_finding(
+        db=db,
+        tenant_id=principal.tenant_id,
+        principal_id=principal.principal_id,
+        scan_id=scan_id,
+        finding_id=finding_id,
+        req=payload,
+    )
+
+
+@router.get(
+    "/{scan_id}/compare/{target_scan_id}",
+    response_model=CompareScanFindingsResponse,
+    summary="Compare security findings between two scans with coverage evaluation",
+)
+async def compare_scan_findings(
+    scan_id: str,
+    target_scan_id: str,
+    principal: OperatorPrincipal = Depends(require_permission("web_scan:read")),
+    db: AsyncSession = Depends(get_db),
+):
+    _check_enabled()
+    return await WebScanService.compare_scan_findings(
+        db=db,
+        tenant_id=principal.tenant_id,
+        baseline_scan_id=scan_id,
+        current_scan_id=target_scan_id,
+    )
 
 
 @router.get(

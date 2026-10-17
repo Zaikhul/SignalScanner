@@ -16,23 +16,27 @@ from app.schemas.collector import (
     DiagnosticCommand,
     DiagnosticResult,
 )
-from app.core.security import verify_collector_auth
+from app.core.security import (
+    verify_collector_auth,
+    verify_operator_auth,
+    verify_operator_or_collector_auth,
+)
 from app.schemas.diagnostics import DiagnosticCheckItem, DiagnosticStatus, PreflightDiagnosticResult
 from app.services.collector_service import collector_service
 
-router = APIRouter(prefix="/collectors", tags=["collectors"], dependencies=[Depends(verify_collector_auth)])
+router = APIRouter(prefix="/collectors", tags=["collectors"])
 
 # In-memory latest preflight results cache: {collector_id: PreflightDiagnosticResult}
 _latest_preflight_results: Dict[str, PreflightDiagnosticResult] = {}
 
 
-@router.get("", response_model=List[CollectorResponse])
+@router.get("", response_model=List[CollectorResponse], dependencies=[Depends(verify_operator_or_collector_auth)])
 async def list_collectors(db: AsyncSession = Depends(get_db)):
     """List all registered collectors and their capabilities."""
     return await collector_service.list_collectors(db)
 
 
-@router.post("/register", response_model=CollectorResponse)
+@router.post("/register", response_model=CollectorResponse, dependencies=[Depends(verify_collector_auth)])
 async def register_collector(
     payload: CollectorRegistration, db: AsyncSession = Depends(get_db)
 ):
@@ -40,7 +44,7 @@ async def register_collector(
     return await collector_service.register_collector(db, payload)
 
 
-@router.post("/heartbeat", response_model=CollectorHeartbeatResponse)
+@router.post("/heartbeat", response_model=CollectorHeartbeatResponse, dependencies=[Depends(verify_collector_auth)])
 async def receive_heartbeat(
     payload: CollectorHeartbeat, db: AsyncSession = Depends(get_db)
 ):
@@ -53,20 +57,31 @@ async def receive_heartbeat(
     return CollectorHeartbeatResponse(status="ok", pending_commands=pending)
 
 
-@router.get("/{collector_id}/commands", response_model=List[CollectorCommand])
+@router.get("/{collector_id}/commands", response_model=List[CollectorCommand], dependencies=[Depends(verify_collector_auth)])
 async def get_collector_commands(collector_id: str):
     """Retrieve pending scan commands for a collector."""
     return collector_service.get_pending_commands(collector_id)
 
 
-@router.post("/{collector_id}/commands/{command_id}/ack")
+@router.post("/{collector_id}/commands/{command_id}/ack", dependencies=[Depends(verify_collector_auth)])
 async def acknowledge_collector_command(collector_id: str, command_id: str):
     """Idempotently acknowledge receipt and execution of a collector command."""
     success = collector_service.acknowledge_command(collector_id, command_id)
     return {"status": "acknowledged", "command_id": command_id, "success": success}
 
 
-@router.get("/{collector_id}", response_model=CollectorResponse)
+@router.post("/{collector_id}/commands/{command_id}/status", dependencies=[Depends(verify_collector_auth)])
+async def update_collector_command_status(
+    collector_id: str,
+    command_id: str,
+    status_val: str = Query("running", alias="status"),
+):
+    """Updates operational state of a collector command (accepted, running, completed, failed) (F06)."""
+    success = collector_service.update_command_status(collector_id, command_id, status_val)
+    return {"status": status_val, "command_id": command_id, "success": success}
+
+
+@router.get("/{collector_id}", response_model=CollectorResponse, dependencies=[Depends(verify_operator_or_collector_auth)])
 async def get_collector(collector_id: str, db: AsyncSession = Depends(get_db)):
     """Get single collector details and capabilities."""
     res = await collector_service.get_collector_by_id(db, collector_id)
@@ -77,7 +92,7 @@ async def get_collector(collector_id: str, db: AsyncSession = Depends(get_db)):
     return res
 
 
-@router.post("/{collector_id}/preflight", response_model=PreflightDiagnosticResult)
+@router.post("/{collector_id}/preflight", response_model=PreflightDiagnosticResult, dependencies=[Depends(verify_operator_auth)])
 async def run_preflight_diagnostics(
     collector_id: str,
     mode: str = Query("wifi", pattern="^(wifi|bluetooth|radio)$"),
@@ -238,7 +253,7 @@ async def run_preflight_diagnostics(
     return result
 
 
-@router.post("/{collector_id}/diagnostics/result")
+@router.post("/{collector_id}/diagnostics/result", dependencies=[Depends(verify_collector_auth)])
 async def store_diagnostic_result(
     collector_id: str,
     payload: Dict[str, Any],
@@ -252,7 +267,7 @@ async def store_diagnostic_result(
         return {"status": "ignored", "error": str(e)}
 
 
-@router.post("/{collector_id}/commands/diagnose", response_model=DiagnosticResult)
+@router.post("/{collector_id}/commands/diagnose", response_model=DiagnosticResult, dependencies=[Depends(verify_operator_auth)])
 async def run_collector_diagnostic(
     collector_id: str,
     cmd: DiagnosticCommand,
@@ -266,7 +281,7 @@ async def run_collector_diagnostic(
 _active_daemon_process: Optional[subprocess.Popen] = None
 
 
-@router.post("/{collector_id}/spawn-daemon")
+@router.post("/{collector_id}/spawn-daemon", dependencies=[Depends(verify_operator_auth)])
 async def spawn_local_daemon(
     collector_id: str,
     mode: str = Query("wifi", pattern="^(wifi|bluetooth|radio)$"),

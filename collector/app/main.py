@@ -103,7 +103,8 @@ class CollectorDaemon:
 
         for attempt in range(1, 16):
             try:
-                async with httpx.AsyncClient(base_url=self.backend_url, timeout=5.0) as client:
+                reg_timeout = httpx.Timeout(15.0, connect=5.0)
+                async with httpx.AsyncClient(base_url=self.backend_url, timeout=reg_timeout) as client:
                     res = await client.post("/api/v1/collectors/register", json=payload, headers=self._headers())
                     if res.status_code == 200:
                         logger.info(f"Successfully registered collector '{collector_settings.COLLECTOR_ID}' with backend")
@@ -683,7 +684,7 @@ class CollectorDaemon:
             f"  - Platform: {collector_settings.PLATFORM}\n"
             f"  - Mode: {mode}\n"
             f"  - Backend: {self.backend_url}\n"
-            f"  - Local Agent: http://127.0.0.1:8001\n"
+            f"  - Local Agent: http://127.0.0.1:{collector_settings.LOCAL_AGENT_PORT}\n"
             f"  - Status: READY (Awaiting scan & association commands...)"
         )
 

@@ -353,7 +353,7 @@ class LanHostModel(Base):
     ip: Mapped[str] = mapped_column(String(45), nullable=False)
     ip_version: Mapped[int] = mapped_column(Integer, default=4)
     hostname: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
-    mac_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    mac_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     oui_vendor: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     discovery_methods: Mapped[List[str]] = mapped_column(JSON, default=list)
     reachability: Mapped[str] = mapped_column(String(32), default="up")
@@ -492,4 +492,25 @@ class ChannelValidationRunModel(Base):
     )
     baseline_recommendation: Mapped[Optional["ChannelRecommendationModel"]] = relationship(
         "ChannelRecommendationModel", back_populates="validations"
+    )
+
+
+class CollectorCommandModel(Base):
+    """Persistent storage for collector daemon commands (F06)."""
+    __tablename__ = "collector_commands"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    collector_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("collectors.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    session_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    command_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(32), default="pending")  # pending, accepted, running, completed, failed
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )

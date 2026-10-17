@@ -36,6 +36,17 @@ class OfflineBufferQueue:
                 )
                 """
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS buffer_loss_ledger (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    dropped_count INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
 
             # Check if retry_count column exists in buffered_batches
             cursor = await db.execute("PRAGMA table_info(buffered_batches)")
@@ -77,7 +88,17 @@ class OfflineBufferQueue:
             count = count_row[0] if count_row else 0
 
             if count >= collector_settings.MAX_BUFFER_RECORDS:
-                # Drop oldest batch to prevent disk overflow
+                # Record eviction in buffer_loss_ledger before dropping
+                await db.execute(
+                    """
+                    INSERT INTO buffer_loss_ledger (session_id, dropped_count, reason)
+                    SELECT session_id, COUNT(*), 'BUFFER_OVERFLOW_EVICTION'
+                    FROM buffered_batches
+                    WHERE id IN (SELECT id FROM buffered_batches ORDER BY id ASC LIMIT 50)
+                    GROUP BY session_id
+                    """
+                )
+                # Drop oldest batches to prevent disk overflow
                 await db.execute(
                     "DELETE FROM buffered_batches WHERE id IN (SELECT id FROM buffered_batches ORDER BY id ASC LIMIT 50)"
                 )
@@ -91,6 +112,31 @@ class OfflineBufferQueue:
             )
             await db.commit()
             return cursor.lastrowid
+
+    async def move_to_dead_letter_atomic(
+        self,
+        batch_id: int,
+        status_code: Optional[int],
+        reason_code: str,
+    ) -> bool:
+        """Atomically transitions batch from buffered_batches to dead_letter_batches (F04)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                inserted = await db.execute(
+                    """
+                    INSERT INTO dead_letter_batches (session_id, status_code, error_reason, payload_json)
+                    SELECT session_id, ?, ?, payload_json FROM buffered_batches WHERE id = ?
+                    """,
+                    (status_code, reason_code, batch_id),
+                )
+                if inserted.rowcount == 1:
+                    await db.execute("DELETE FROM buffered_batches WHERE id = ?", (batch_id,))
+                await db.commit()
+                return inserted.rowcount == 1
+            except Exception:
+                await db.rollback()
+                raise
 
     async def increment_retry(self, db_id: int) -> int:
         async with aiosqlite.connect(self.db_path) as db:

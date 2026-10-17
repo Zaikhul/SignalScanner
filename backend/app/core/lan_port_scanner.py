@@ -183,15 +183,53 @@ class LanPortScanner:
             return {
                 "port": port,
                 "service": PORT_SERVICE_MAP.get(port, "unknown"),
+                "service_hint": PORT_SERVICE_MAP.get(port),
+                "service_verified": bool(banner),
                 "state": "open",
                 "protocol": "tcp",
                 "banner": banner,
             }
-        except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
-            return None
+        except asyncio.TimeoutError:
+            return {
+                "port": port,
+                "service": PORT_SERVICE_MAP.get(port, "unknown"),
+                "service_hint": PORT_SERVICE_MAP.get(port),
+                "service_verified": False,
+                "state": "timeout",
+                "protocol": "tcp",
+                "banner": None,
+            }
+        except ConnectionRefusedError:
+            return {
+                "port": port,
+                "service": PORT_SERVICE_MAP.get(port, "unknown"),
+                "service_hint": PORT_SERVICE_MAP.get(port),
+                "service_verified": False,
+                "state": "refused",
+                "protocol": "tcp",
+                "banner": None,
+            }
+        except OSError as e:
+            return {
+                "port": port,
+                "service": PORT_SERVICE_MAP.get(port, "unknown"),
+                "service_hint": PORT_SERVICE_MAP.get(port),
+                "service_verified": False,
+                "state": "error",
+                "protocol": "tcp",
+                "banner": None,
+            }
         except Exception as e:
             logger.debug(f"Unexpected probe error on {ip}:{port}: {e}")
-            return None
+            return {
+                "port": port,
+                "service": PORT_SERVICE_MAP.get(port, "unknown"),
+                "service_hint": PORT_SERVICE_MAP.get(port),
+                "service_verified": False,
+                "state": "error",
+                "protocol": "tcp",
+                "banner": None,
+            }
 
     async def scan_host_ports(
         self,
@@ -201,6 +239,7 @@ class LanPortScanner:
         concurrency: Optional[int] = None,
         attached_prefix: Optional[str] = None,
         allow_loopback: bool = False,
+        return_all: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Executes bounded port scan on validated LAN target.
@@ -226,13 +265,14 @@ class LanPortScanner:
         tasks = [_bounded_probe(p) for p in ports_to_scan]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        open_ports: List[Dict[str, Any]] = []
+        matched_ports: List[Dict[str, Any]] = []
         for r in results:
-            if isinstance(r, dict) and r.get("state") == "open":
-                open_ports.append(r)
+            if isinstance(r, dict):
+                if return_all or r.get("state") == "open":
+                    matched_ports.append(r)
 
-        open_ports.sort(key=lambda x: x["port"])
-        return open_ports
+        matched_ports.sort(key=lambda x: x["port"])
+        return matched_ports
 
 
 lan_port_scanner = LanPortScanner()

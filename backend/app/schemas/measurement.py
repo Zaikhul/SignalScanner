@@ -63,6 +63,7 @@ class QualityFlags(BaseModel):
     freshness: FreshnessState = "fresh"
     cache_possible: bool = False
     rssi_processing: RssiProcessing = "unknown"
+    noise_basis: Optional[str] = "assumed"
     quality_flags: List[str] = Field(default_factory=list)
     fields_unavailable: List[str] = Field(default_factory=list)
 

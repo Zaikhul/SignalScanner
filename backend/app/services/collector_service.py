@@ -60,6 +60,16 @@ class CollectorService:
                 cmd.status = "acknowledged"
                 return True
         return False
+
+    @classmethod
+    def update_command_status(cls, collector_id: str, command_id: str, status: str) -> bool:
+        """Updates lifecycle status of a collector command (accepted, running, completed, failed)."""
+        queue = cls._command_queues.get(collector_id, [])
+        for cmd in queue:
+            if cmd.command_id == command_id:
+                cmd.status = status
+                return True
+        return False
     @staticmethod
     async def register_collector(
         db: AsyncSession, payload: CollectorRegistration

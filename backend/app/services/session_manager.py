@@ -257,16 +257,49 @@ class SessionManager:
         return await SessionManager.get_session_response(db, session_id)
 
     @staticmethod
-    async def stop_session(db: AsyncSession, session_id: str) -> SessionResponse:
+    @staticmethod
+    async def stop_session(db: AsyncSession, session_id: str, drain: bool = False) -> SessionResponse:
         session = await db.get(ScanSessionModel, session_id)
         if not session:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Session {session_id} not found")
 
-        # Idempotency check: if already completed or stopped, return existing response without duplicating manifest
-        if session.status in (SessionStatus.COMPLETED.value, SessionStatus.STOPPED.value):
+        # Idempotency check: if already completed, incomplete, or stopped, return existing response without duplicating manifest
+        if session.status in (SessionStatus.COMPLETED.value, SessionStatus.INCOMPLETE.value, SessionStatus.STOPPED.value):
             return await SessionManager.get_session_response(db, session_id)
 
-        session.status = SessionStatus.COMPLETED.value
+        if drain:
+            session.status = SessionStatus.STOPPING.value
+            if getattr(session, "source_type", "collector") == "collector" and session.collector_id:
+                collector_service.queue_command(
+                    collector_id=session.collector_id,
+                    type="stop_scan",
+                    session_id=session.id,
+                )
+            await db.commit()
+            await db.refresh(session)
+            await stream_engine.publish_event(
+                session_id,
+                {
+                    "type": "session.state_changed",
+                    "schema_version": "2.0",
+                    "session_id": session_id,
+                    "status": SessionStatus.STOPPING.value,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            return await SessionManager.get_session_response(db, session_id)
+
+        return await SessionManager.finalize_session(db, session_id)
+
+    @staticmethod
+    async def finalize_session(db: AsyncSession, session_id: str) -> SessionResponse:
+        session = await db.get(ScanSessionModel, session_id)
+        if not session:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Session {session_id} not found")
+
+        if session.status in (SessionStatus.COMPLETED.value, SessionStatus.INCOMPLETE.value, SessionStatus.STOPPED.value):
+            return await SessionManager.get_session_response(db, session_id)
+
         session.ended_at = datetime.now(timezone.utc)
 
         # Clear EMA state for this session (F-23)
@@ -304,6 +337,9 @@ class SessionManager:
                 gap_end = distinct_seqs[i + 1] - 1
                 if gap_start <= gap_end:
                     missing_ranges.append([gap_start, gap_end])
+
+        final_status = SessionStatus.INCOMPLETE.value if missing_ranges else SessionStatus.COMPLETED.value
+        session.status = final_status
 
         res_col = await db.get(CollectorModel, session.collector_id) if session.collector_id else None
 
@@ -349,7 +385,7 @@ class SessionManager:
                 "type": "session.state_changed",
                 "schema_version": "2.0",
                 "session_id": session_id,
-                "status": SessionStatus.COMPLETED.value,
+                "status": final_status,
                 "manifest_checksum": manifest.manifest_checksum,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
@@ -452,10 +488,10 @@ class SessionManager:
         if not session:
             raise ValueError(f"Session {batch.session_id} not found")
 
-        # Validate session is actively accepting ingests
-        if session.status not in (SessionStatus.ACTIVE.value, SessionStatus.STARTING.value):
+        # Validate session is actively accepting ingests (allows STOPPING during drain phase)
+        if session.status not in (SessionStatus.ACTIVE.value, SessionStatus.STARTING.value, SessionStatus.STOPPING.value):
             raise ValueError(
-                f"SESSION_NOT_ACTIVE: Session '{session.id}' is in '{session.status}' status, must be active"
+                f"SESSION_NOT_ACTIVE: Session '{session.id}' is in '{session.status}' status, must be active or stopping"
             )
 
         batch_source = getattr(batch, "source_type", "collector") or "collector"

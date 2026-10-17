@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "vitest run"
+    "test": "vitest run",
+    "geo:110m": "node scripts/generate-geo-assets.mjs 110m",
+    "geo:50m": "node scripts/generate-geo-assets.mjs 50m"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.7",
@@ -23,6 +25,9 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^3.0.1",
+    "three": "^0.186.1",
+    "topojson-client": "^3.1.0",
+    "world-atlas": "^2.0.2",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
@@ -30,6 +35,8 @@
     "@types/node": "^22.13.4",
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
+    "@types/three": "^0.186.0",
+    "@types/topojson-client": "^3.1.5",
     "eslint": "^9.39.5",
     "eslint-config-next": "15.1.7",
     "postcss": "^8.5.2",

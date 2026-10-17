@@ -16,6 +16,7 @@ from app.config import settings
 from app.core.web_scan.network_policy import (
     validate_and_normalize_target,
     validate_target_against_scope,
+    mask_sensitive_query_params,
 )
 from app.db.web_scan_models import (
     WebScanAuditRecordModel,
@@ -45,6 +46,9 @@ from app.schemas.web_scan import (
     ScopeGrant,
     Severity,
     WebScanEvent,
+    TriageFindingRequest,
+    FindingComparisonItem,
+    CompareScanFindingsResponse,
 )
 
 logger = logging.getLogger("signal_scanner.web_scan.service")
@@ -443,8 +447,8 @@ class WebScanService:
             scope_id=scope_record.id if scope_record else None,
             scope_revision=scope_record.revision if scope_record else 1,
             scope_hash=scope_record.scope_hash if scope_record else "inline_scope",
-            raw_target=req.target,
-            normalized_target=norm_target,
+            raw_target=mask_sensitive_query_params(req.target),
+            normalized_target=mask_sensitive_query_params(norm_target),
             target_display=display_target,
             requested_configuration=config.model_dump(),
             effective_configuration=eff_config,
@@ -689,10 +693,179 @@ class WebScanService:
                     assessment_version=r.assessment_version,
                     first_seen_at=r.first_seen_at,
                     last_seen_at=r.last_seen_at,
+                    triage_status=r.triage_status or "open",
+                    triage_reason=r.triage_reason,
+                    triage_actor=r.triage_actor,
+                    triaged_at=r.triaged_at,
+                    triage_version=r.triage_version or 1,
                 )
             )
 
         return findings, total
+
+    @staticmethod
+    async def triage_finding(
+        db: AsyncSession,
+        tenant_id: str,
+        principal_id: str,
+        scan_id: str,
+        finding_id: str,
+        req: TriageFindingRequest,
+    ) -> ScanFinding:
+        job = await WebScanService.get_scan_job(db, tenant_id, scan_id)
+        if not job:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Scan {scan_id} not found")
+
+        finding = await db.get(WebScanFindingModel, finding_id)
+        if not finding or finding.scan_id != scan_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Finding {finding_id} not found")
+
+        if req.expected_version is not None and finding.triage_version != req.expected_version:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflict: finding triage version is {finding.triage_version}, expected {req.expected_version}",
+            )
+
+        now = datetime.now(timezone.utc)
+        finding.triage_status = req.status
+        finding.triage_reason = req.reason
+        finding.triage_actor = principal_id
+        finding.triaged_at = now
+        finding.triage_version = (finding.triage_version or 1) + 1
+
+        # Audit log for triage
+        audit = WebScanAuditRecordModel(
+            tenant_id=tenant_id,
+            principal_id=principal_id,
+            action="finding_triaged",
+            details={
+                "scan_id": scan_id,
+                "finding_id": finding_id,
+                "status": req.status,
+                "reason": req.reason,
+                "version": finding.triage_version,
+            },
+            created_at=now,
+        )
+        db.add(audit)
+        await db.commit()
+        await db.refresh(finding)
+
+        evidence_data = finding.evidence or {}
+        excerpts = [
+            EvidenceExcerpt(kind=e.get("kind", "text"), value_redacted=e.get("value_redacted", ""))
+            for e in evidence_data.get("excerpts", [])
+        ]
+        return ScanFinding(
+            id=finding.id,
+            scan_id=finding.scan_id,
+            module=ModuleId(finding.module) if finding.module in ModuleId._value2member_map_ else ModuleId.RECON,
+            check_id=finding.check_id,
+            category=finding.category,
+            source_category=finding.source_category,
+            severity=Severity(finding.severity.lower()) if finding.severity.lower() in Severity._value2member_map_ else Severity.INFO,
+            source_severity=Severity(finding.source_severity.lower()) if finding.source_severity and finding.source_severity.lower() in Severity._value2member_map_ else None,
+            severity_reason=finding.severity_reason,
+            confidence=Confidence(finding.confidence) if finding.confidence in Confidence._value2member_map_ else Confidence.CONFIRMED_CONFIG,
+            title=finding.title,
+            description=finding.description,
+            remediation=finding.remediation,
+            evidence=Evidence(
+                url_display=evidence_data.get("url_display", ""),
+                method=evidence_data.get("method"),
+                status_code=evidence_data.get("status_code"),
+                header_names=evidence_data.get("header_names", []),
+                excerpts=excerpts,
+                elapsed_ms=evidence_data.get("elapsed_ms"),
+                baseline_elapsed_ms=evidence_data.get("baseline_elapsed_ms"),
+            ),
+            fingerprint=finding.fingerprint,
+            occurrence_count=finding.occurrence_count,
+            assessment_version=finding.assessment_version,
+            first_seen_at=finding.first_seen_at,
+            last_seen_at=finding.last_seen_at,
+            triage_status=finding.triage_status or "open",
+            triage_reason=finding.triage_reason,
+            triage_actor=finding.triage_actor,
+            triaged_at=finding.triaged_at,
+            triage_version=finding.triage_version or 1,
+        )
+
+    @staticmethod
+    async def compare_scan_findings(
+        db: AsyncSession,
+        tenant_id: str,
+        baseline_scan_id: str,
+        current_scan_id: str,
+    ) -> CompareScanFindingsResponse:
+        base_job = await WebScanService.get_scan_job(db, tenant_id, baseline_scan_id)
+        curr_job = await WebScanService.get_scan_job(db, tenant_id, current_scan_id)
+        if not base_job or not curr_job:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan job not found")
+
+        compatible = (
+            base_job.tenant_id == curr_job.tenant_id
+            and base_job.target_display == curr_job.target_display
+        )
+        compat_reason = None
+        if not compatible:
+            compat_reason = "Targets or tenants are different, scans are not directly comparable"
+
+        res_b = await db.execute(select(WebScanFindingModel).where(WebScanFindingModel.scan_id == baseline_scan_id))
+        base_findings = {f.fingerprint: f for f in res_b.scalars().all()}
+
+        res_c = await db.execute(select(WebScanFindingModel).where(WebScanFindingModel.scan_id == current_scan_id))
+        curr_findings = {f.fingerprint: f for f in res_c.scalars().all()}
+
+        items: List[FindingComparisonItem] = []
+        if not compatible:
+            for fp, f in curr_findings.items():
+                items.append(FindingComparisonItem(
+                    fingerprint=fp,
+                    title=f.title,
+                    severity=Severity(f.severity.lower()),
+                    status="not_comparable",
+                    baseline_finding_id=None,
+                    current_finding_id=f.id,
+                ))
+            return CompareScanFindingsResponse(
+                baseline_scan_id=baseline_scan_id,
+                current_scan_id=current_scan_id,
+                compatible=False,
+                compatibility_reason=compat_reason,
+                findings=items,
+            )
+
+        all_fps = set(base_findings.keys()) | set(curr_findings.keys())
+        for fp in all_fps:
+            bf = base_findings.get(fp)
+            cf = curr_findings.get(fp)
+            if bf and cf:
+                status_label = "recurring"
+                ref_f = cf
+            elif cf and not bf:
+                status_label = "new"
+                ref_f = cf
+            else:
+                status_label = "resolved"
+                ref_f = bf
+
+            items.append(FindingComparisonItem(
+                fingerprint=fp,
+                title=ref_f.title,
+                severity=Severity(ref_f.severity.lower()),
+                status=status_label,
+                baseline_finding_id=bf.id if bf else None,
+                current_finding_id=cf.id if cf else None,
+            ))
+
+        return CompareScanFindingsResponse(
+            baseline_scan_id=baseline_scan_id,
+            current_scan_id=current_scan_id,
+            compatible=True,
+            compatibility_reason=None,
+            findings=items,
+        )
 
     @staticmethod
     async def list_scan_observations(

@@ -82,10 +82,23 @@ async def resume_session(session_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{session_id}/stop", response_model=SessionResponse)
-async def stop_session(session_id: str, db: AsyncSession = Depends(get_db)):
-    """Stop active scanning and finalize session metrics."""
+async def stop_session(
+    session_id: str,
+    drain: bool = Query(False, description="Enable two-phase drain window before finalization"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stop active scanning and finalize session metrics (or begin drain phase if drain=True)."""
     try:
-        return await session_manager.stop_session(db, session_id)
+        return await session_manager.stop_session(db, session_id, drain=drain)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+@router.post("/{session_id}/finalize", response_model=SessionResponse)
+async def finalize_session(session_id: str, db: AsyncSession = Depends(get_db)):
+    """Explicitly finalize a stopping session, evaluate completeness, and freeze manifest."""
+    try:
+        return await session_manager.finalize_session(db, session_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
@@ -115,4 +128,20 @@ async def add_session_marker(
         return await session_manager.add_marker(db, session_id, payload)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+@router.post("/{session_id}/ws-ticket")
+async def create_session_ws_ticket(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Generates a single-use short-lived ticket for the session WebSocket stream."""
+    try:
+        await session_manager.get_session_response(db, session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    
+    from app.core.security import issue_session_ws_ticket
+    ticket = issue_session_ws_ticket(session_id)
+    return {"ticket": ticket, "session_id": session_id, "ttl_seconds": 60}
 

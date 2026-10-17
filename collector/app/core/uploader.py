@@ -121,16 +121,15 @@ class BatchUploader:
                             should_halt = True
                             break
                         else:
-                            # Permanent 4xx error: remove from active retry queue and quarantine
+                            # Permanent 4xx error: atomically move to dead-letter (F04)
                             logger.warning(
                                 f"Drained batch {db_id} rejected with permanent error {res.status_code}. Quarantining to dead-letter."
                             )
-                            await buffer_queue.remove_batch(db_id)
-                            await buffer_queue.push_dead_letter(
-                                session_id=session_id,
+                            reason = res.text[:500] if res.text else f"HTTP_{res.status_code}"
+                            await buffer_queue.move_to_dead_letter_atomic(
+                                batch_id=db_id,
                                 status_code=res.status_code,
-                                error_reason=res.text[:500],
-                                batch=item["batch"],
+                                reason_code=reason,
                             )
                             # Continue draining subsequent batches
                             continue
@@ -141,12 +140,10 @@ class BatchUploader:
                             logger.warning(
                                 f"Batch {db_id} exceeded MAX_RETRIES on network error ({e}). Moving to dead-letter queue."
                             )
-                            await buffer_queue.remove_batch(db_id)
-                            await buffer_queue.push_dead_letter(
-                                session_id=session_id,
+                            await buffer_queue.move_to_dead_letter_atomic(
+                                batch_id=db_id,
                                 status_code=None,
-                                error_reason=f"EXCEEDED_MAX_RETRIES ({new_retries}): NetworkError {e}",
-                                batch=item["batch"],
+                                reason_code=f"EXCEEDED_MAX_RETRIES ({new_retries}): NetworkError {e}",
                             )
                         should_halt = True
                         break

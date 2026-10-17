@@ -177,6 +177,11 @@ export interface ScanFinding {
   assessment_version: string;
   first_seen_at: string;
   last_seen_at: string;
+  triage_status?: "open" | "in_progress" | "false_positive" | "accepted_risk" | "resolved";
+  triage_reason?: string | null;
+  triage_actor?: string | null;
+  triaged_at?: string | null;
+  triage_version?: number;
 }
 
 export interface ScanObservation {
@@ -351,6 +356,9 @@ export interface GeoEndpoint {
   location_status: LocationStatus;
   status_reason?: string | null;
   provider_info?: string | null;
+  hostnames?: string[];
+  highest_severity?: Severity | "none";
+  finding_count?: number;
 }
 
 export type RelationBasis = "observed_http" | "transport_attempt" | "configured_target";
@@ -367,6 +375,14 @@ export interface GeoRelation {
   methods: string[];
   supporting_observation_ids: string[];
   linked_finding_ids: string[];
+  module_ids?: string[];
+  avg_latency_ms?: number | null;
+  max_latency_ms?: number | null;
+  total_bytes?: number;
+  highest_severity?: Severity | "none";
+  finding_counts?: Record<string, number>;
+  first_observed_at?: string | null;
+  last_observed_at?: string | null;
 }
 
 export interface GeoCoverage {

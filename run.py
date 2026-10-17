@@ -9,6 +9,7 @@ import argparse
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -131,6 +132,33 @@ def wait_for_http(url: str, timeout_sec: float = 30.0, step_sec: float = 0.5) ->
     return False
 
 
+def test_port_available(port: int, host: str = "127.0.0.1") -> bool:
+    """Tests if a port can be bound without permission errors (WinError 10013) or collisions."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, port))
+            return True
+    except Exception:
+        return False
+
+
+def resolve_available_port(preferred: int, fallbacks: List[int], name: str, host: str = "127.0.0.1") -> int:
+    """Selects preferred port if open, or auto-falls back to alternative open ports."""
+    if test_port_available(preferred, host):
+        return preferred
+    log("ORCHESTRATOR", CLR_YELLOW, f"Port {preferred} for {name} is unavailable (blocked or WinError 10013). Searching fallback...")
+    for p in fallbacks:
+        if test_port_available(p, host):
+            log("ORCHESTRATOR", CLR_GREEN, f"Assigned fallback port {p} for {name}.")
+            return p
+    for p in range(8500, 9500):
+        if p not in fallbacks and test_port_available(p, host):
+            log("ORCHESTRATOR", CLR_GREEN, f"Assigned fallback port {p} for {name}.")
+            return p
+    return preferred
+
+
 def resolve_frontend_runner(port: int = 3000) -> Optional[List[str]]:
     """Detects available node package manager (pnpm, npm) and passes port."""
     pnpm_cmd = shutil.which("pnpm") or shutil.which("pnpm.cmd")
@@ -214,16 +242,42 @@ def main() -> None:
     frontend_dir = os.path.join(root_dir, "frontend")
     backend_dir = os.path.join(root_dir, "backend")
 
+    # Smart port detection (handles Windows Hyper-V / WSL2 port exclusions)
+    backend_port = resolve_available_port(
+        preferred=args.port_backend,
+        fallbacks=[8888, 9000, 8500, 8081, 8089],
+        name="Backend",
+    )
+    collector_port = resolve_available_port(
+        preferred=8001,
+        fallbacks=[8889, 9001, 8501, 8082],
+        name="Collector Local Agent",
+    )
+    frontend_port = resolve_available_port(
+        preferred=args.port_frontend,
+        fallbacks=[3000, 3001, 3002, 3003],
+        name="Frontend",
+    )
+
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["FORCE_COLOR"] = "1"
-    env["PORT"] = str(args.port_frontend)
+    env["PORT"] = str(frontend_port)
+    env["LOCAL_AGENT_PORT"] = str(collector_port)
+    env["COLLECTOR_PORT"] = str(collector_port)
 
-    # 1. Launch Backend
-    backend_url = f"http://127.0.0.1:{args.port_backend}"
+    backend_url = f"http://127.0.0.1:{backend_port}"
+    collector_url = f"http://127.0.0.1:{collector_port}"
+
     env["NEXT_PUBLIC_API_URL"] = backend_url
+    env["INTERNAL_API_URL"] = backend_url
+    env["NEXT_PUBLIC_COLLECTOR_URL"] = collector_url
     env.setdefault("NEXT_PUBLIC_API_AUTH_TOKEN", env.get("API_AUTH_TOKEN", "signal-scanner-dev-token-2026"))
     env.setdefault("NEXT_PUBLIC_LOCAL_COLLECTOR_TOKEN", env.get("LOCAL_AGENT_TOKEN", "signal-scanner-local-agent-token-2026"))
+
+    backend_proc: Optional[subprocess.Popen] = None
+
+    # 1. Launch Backend
     if not args.no_backend:
         log("ORCHESTRATOR", CLR_MAGENTA, f"Launching Backend on {backend_url}...")
         backend_cmd = [
@@ -236,8 +290,10 @@ def main() -> None:
             "--host",
             "127.0.0.1",
             "--port",
-            str(args.port_backend),
+            str(backend_port),
             "--reload",
+            "--reload-dir",
+            os.path.join(root_dir, "backend"),
         ]
         backend_proc = subprocess.Popen(
             backend_cmd,
@@ -265,7 +321,7 @@ def main() -> None:
     # 2. Launch Collector Daemon
     if not args.no_collector:
         mode_desc = f"{args.mode.upper()} {'(Virtual Mock)' if args.mock else '(Hardware Native)'}"
-        log("ORCHESTRATOR", CLR_MAGENTA, f"Launching Collector Daemon [{mode_desc}]...")
+        log("ORCHESTRATOR", CLR_MAGENTA, f"Launching Collector Daemon [{mode_desc}] on local port {collector_port}...")
         collector_cmd = [
             sys.executable,
             "-m",
@@ -299,14 +355,24 @@ def main() -> None:
         log("ORCHESTRATOR", CLR_YELLOW, "Skipping Collector (--no-collector specified)")
 
     # 3. Launch Frontend
-    frontend_url = f"http://localhost:{args.port_frontend}"
+    frontend_url = f"http://localhost:{frontend_port}"
     if not args.no_frontend:
-        frontend_runner = resolve_frontend_runner(args.port_frontend)
+        frontend_runner = resolve_frontend_runner(frontend_port)
         if not frontend_runner:
             log("ORCHESTRATOR", CLR_RED, "Neither 'pnpm' nor 'npm' found in PATH. Skipping Frontend.")
-        elif not os.path.exists(os.path.join(frontend_dir, "node_modules")):
-            log("ORCHESTRATOR", CLR_RED, "frontend/node_modules not found. Please run 'pnpm install' in ./frontend first.")
         else:
+            # Self-heal check for Windows: make sure node_modules and next binary exist
+            next_bin = os.path.join(frontend_dir, "node_modules", ".bin", "next.cmd" if sys.platform == "win32" else "next")
+            if not os.path.exists(os.path.join(frontend_dir, "node_modules")) or not os.path.exists(next_bin):
+                log("ORCHESTRATOR", CLR_YELLOW, "Frontend node_modules or Next.js shims missing. Auto-running package installation...")
+                pkg_cmd = shutil.which("pnpm.cmd") or shutil.which("pnpm") or shutil.which("npm.cmd") or shutil.which("npm")
+                if pkg_cmd:
+                    install_env = env.copy()
+                    install_env["CI"] = "true"
+                    res = subprocess.run([pkg_cmd, "install"], cwd=frontend_dir, shell=(sys.platform == "win32"), env=install_env, check=False)
+                    if res.returncode != 0:
+                        log("ORCHESTRATOR", CLR_RED, f"Package installation failed with exit code {res.returncode}. Continuing anyway...")
+
             log("ORCHESTRATOR", CLR_MAGENTA, f"Launching Frontend ({' '.join(frontend_runner)}) on {frontend_url}...")
             frontend_proc = subprocess.Popen(
                 frontend_runner,
@@ -314,6 +380,7 @@ def main() -> None:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 env=env,
+                shell=(sys.platform == "win32"),
             )
             processes.append(frontend_proc)
             threading.Thread(
@@ -338,12 +405,18 @@ def main() -> None:
     # Main monitoring loop
     log("ORCHESTRATOR", CLR_GREEN, f"{CLR_BOLD}All requested services initiated. Press Ctrl+C to stop all services.{CLR_RESET}")
     try:
-        while True:
-            # Check if any process terminated prematurely
-            for proc in list(processes):
+        monitored_processes = list(processes)
+        while not shutdown_event.is_set():
+            for proc in list(monitored_processes):
                 exit_code = proc.poll()
-                if exit_code is not None and not shutdown_event.is_set():
-                    log("ORCHESTRATOR", CLR_RED, f"A child process (PID {proc.pid}) exited unexpectedly with code {exit_code}")
+                if exit_code is not None:
+                    monitored_processes.remove(proc)
+                    if exit_code != 0 and not shutdown_event.is_set():
+                        log("ORCHESTRATOR", CLR_RED, f"A child process (PID {proc.pid}) exited with code {exit_code}")
+                        if backend_proc and proc.pid == backend_proc.pid:
+                            log("ORCHESTRATOR", CLR_RED, "FastAPI Backend stopped unexpectedly. Shutting down all components...")
+                            cleanup()
+                            sys.exit(1)
             time.sleep(1.0)
     except KeyboardInterrupt:
         log("ORCHESTRATOR", CLR_MAGENTA, "Received Ctrl+C keyboard interrupt.")

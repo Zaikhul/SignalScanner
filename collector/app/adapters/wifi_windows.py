@@ -214,6 +214,7 @@ class WindowsWiFiAdapter(SignalAdapter):
                         "calibrated": is_native,
                         "permission_limited": False,
                         "throttled": False,
+                        "noise_basis": "assumed",
                         "scan_id": scan_id,
                         "scan_requested_at": t_req.isoformat(),
                         "scan_completed_at": t_comp.isoformat(),

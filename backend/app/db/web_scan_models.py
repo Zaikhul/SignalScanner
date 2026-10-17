@@ -145,6 +145,11 @@ class WebScanFindingModel(Base):
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     assessment_version: Mapped[str] = mapped_column(String(32), default="web_scan.v1")
+    triage_status: Mapped[str] = mapped_column(String(32), default="open")  # open, in_progress, false_positive, accepted_risk, resolved
+    triage_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    triage_actor: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    triaged_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    triage_version: Mapped[int] = mapped_column(Integer, default=1)
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

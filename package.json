@@ -12,6 +12,14 @@
     "start": "python run.py",
     "test": "pytest backend/tests collector/tests -v && pnpm --prefix frontend test",
     "test:py": "pytest backend/tests collector/tests -v",
-    "test:fe": "pnpm --prefix frontend test"
+    "test:fe": "pnpm --prefix frontend test",
+    "test:e2e": "e2e run"
+  },
+  "devDependencies": {
+    "@ai-sdk/openai": "^4.0.91",
+    "@e2e-dev/web": "^0.14.0",
+    "ai": "^7.0.0",
+    "e2e": "^0.19.0",
+    "zod": "^4.1.8"
   }
 }

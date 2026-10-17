@@ -151,6 +151,7 @@ class SoapySDRSignalAdapter(SignalAdapter):
                             "calibrated": False,
                             "permission_limited": False,
                             "throttled": False,
+                            "noise_basis": "assumed",
                             "scan_id": scan_id,
                             "scan_requested_at": now_iso,
                             "scan_completed_at": now_iso,

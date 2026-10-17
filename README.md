@@ -12,8 +12,8 @@ Sistem instrumen pengukuran kekuatan sinyal multi-mode real-time dengan antarmuk
   - **Ghost Web Scanner & 3D Globe Topologi**:
     - Audit keamanan web terisolasi dengan 7 modul deteksi (recon, security headers, cookie audit, HTML forms/CSRF, parameter diagnostics, header injection probes, dan load resilience).
     - Stress resilience testing terikat (*bounded DDoS load testing*) dengan token-bucket rate limiting dan mitigasi SSRF berbasis DNS pinning terisolasi.
-    - **Visualisasi 3D Globe Interaktif**: Visualisasi spasial node dan busur relasi host/IP berbasis Three.js dengan filter koneksi, inspektur detail relasi, dan integrasi geolokasi IP real-time.
-    - Live event streaming via Server-Sent Events (SSE) dan ekspor hasil audit bertanda tangan SHA-256.
+    - **Visualisasi 3D Globe Spasial**: Visualisasi spasial node dan busur relasi host/IP berbasis Canvas 2D dengan filter koneksi, inspektur detail relasi, dan integrasi geolokasi IP real-time.
+    - Live event streaming via WebSocket (`/ws/v1/web-scans/{scan_id}`) dan ekspor hasil audit dengan verifikasi integritas checksum SHA-256.
 - **Channel Health & Recommendations**:
   - Deteksi interferensi co-channel dan adjacent-channel secara cerdas.
   - Perhitungan ketidakstabilan temporal multi-AP (*temporal instability score*).

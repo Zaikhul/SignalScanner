@@ -89,7 +89,9 @@ class AssociationEventResponse(BaseModel):
 class PortInfo(BaseModel):
     port: int = Field(..., ge=1, le=65535, description="TCP port number")
     service: Optional[str] = Field(default="unknown", description="Identified service name")
-    state: str = Field(default="open", description="Port state (open, closed, filtered)")
+    service_hint: Optional[str] = Field(default=None, description="Inferred service name hint")
+    service_verified: bool = Field(default=False, description="True if verified by banner inspection")
+    state: str = Field(default="open", description="Port state (open, closed, refused, timeout, error)")
     protocol: str = Field(default="tcp", description="Transport protocol")
     banner: Optional[str] = Field(default=None, description="Optional service banner excerpt")
 
@@ -99,10 +101,10 @@ class LanHostItem(BaseModel):
     ip: str
     ip_version: int = 4
     hostname: Optional[str] = None
-    mac_hash: str
+    mac_hash: Optional[str] = None
     oui_vendor: Optional[str] = None
     discovery_methods: List[str] = Field(default_factory=list)
-    reachability: str = "up"  # up, limited, down
+    reachability: str = "up"  # up, limited, down, unknown
     rtt_ms: Optional[float] = None
     is_self: bool = False
     is_gateway: bool = False

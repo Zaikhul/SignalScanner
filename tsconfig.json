@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["e2e.config.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules", "frontend", "backend", "collector"]
+}

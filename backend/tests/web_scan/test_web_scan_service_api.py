@@ -273,5 +273,11 @@ async def test_legacy_v47_profile_stress_module_execution_and_findings():
         assert deduped[0].check_id == "stress.bounded_load_test"
     finally:
         await client.aclose()
+        async with AsyncSessionLocal() as db_clean:
+            from app.db.web_scan_models import WebScanJobModel
+            job_to_clean = await db_clean.get(WebScanJobModel, job.id)
+            if job_to_clean:
+                await db_clean.delete(job_to_clean)
+                await db_clean.commit()
 
 
